@@ -1,0 +1,22 @@
+# 本地 AI 助手说明与提示词，不随插件发布
+AGENTS.md
+.ccgui/
+
+# 依赖与构建缓存
+node_modules/
+dist/
+build/
+*.log
+
+# 编辑器 / 系统临时文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.bak
+*.swp
+
+# 说明：main.js 是 node scripts/build.mjs 的产物，但插件库发布与宿主安装都直接
+# 使用这份单文件 ESM（插件库需要它的 sha256），因此必须入库，不能忽略。
