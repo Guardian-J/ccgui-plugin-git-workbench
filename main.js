@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.11";
+const PLUGIN_VERSION = "0.2.12";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -5989,11 +5989,13 @@ const PLUGIN_CSS = `
 .cg-ref.cg-tag{background:var(--color-status-yellow-background);color:var(--color-status-yellow-text)}
 .cg-ref.cg-remote{background:var(--color-background-tertiary-default);color:var(--color-text-secondary)}
 .cg-detail-head{padding:0.75rem 1rem;border-bottom:1px solid var(--cg-border);flex:none}
-.cg-detail-subject{font-size:0.875rem;font-weight:600;margin-bottom:0.5rem;word-break:break-word}
+.cg-detail-subject-row{display:flex;align-items:flex-start;gap:0.5rem;margin-bottom:0.5rem}
+.cg-detail-subject{flex:1;min-width:0;font-size:0.875rem;font-weight:600;word-break:break-word}
 .cg-detail-meta{display:grid;grid-template-columns:minmax(4rem,max-content) minmax(0,1fr);gap:0.25rem 0.625rem;color:var(--color-text-secondary);font-size:0.75rem}
 .cg-detail-meta dt{color:var(--color-text-tertiary)}
 .cg-detail-meta dd{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cg-detail-body{white-space:pre-wrap;font-family:var(--font-mono);font-size:0.7188rem;padding:0.625rem 1rem;border-bottom:1px solid var(--cg-border);max-height:11.25rem;overflow:auto;background:var(--cg-surface-2);color:var(--color-text-secondary)}
+.cg-detail-body{flex:none;white-space:pre-wrap;font-family:var(--font-mono);font-size:0.7188rem;padding:0.625rem 1rem;border-bottom:1px solid var(--cg-border);max-height:min(42vh,26rem);overflow:auto;background:var(--cg-surface-2);color:var(--color-text-secondary)}
+.cg-detail-section{display:flex;align-items:center;gap:0.5rem;padding:0.4375rem 1rem;font-weight:650;font-size:0.6875rem;letter-spacing:.04em;color:var(--color-text-tertiary);background:var(--cg-surface-2);border-bottom:1px solid var(--cg-border);flex:none}
 .cg-detail-files{flex:none;border-bottom:1px solid var(--cg-border);padding:2px 0}
 .cg-log-detail{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;overflow:auto}
 .cg-actions-row{display:flex;align-items:center;gap:0.375rem;padding:0.4375rem 0.75rem;border-bottom:1px solid var(--cg-border);flex-wrap:wrap;flex:none}
@@ -8839,8 +8841,31 @@ function FileTreeList(props) {
 
 function CommitDetail(props) {
   const h = appCtx.react.createElement;
+  const { useState } = appCtx.react;
   const { repo, data } = props;
   const s = useStoreSnapshot();
+  const [collapsed, setCollapsed] = useState(() => ({ head: false, body: false, files: false }));
+  const toggleSection = (key) => setCollapsed((prev) => Object.assign({}, prev, { [key]: !prev[key] }));
+  const sectionHead = (key, label) =>
+    h(
+      "div",
+      {
+        className: "cg-detail-section cg-section-toggle",
+        role: "button",
+        tabIndex: 0,
+        "aria-expanded": !collapsed[key],
+        title: (collapsed[key] ? "展开" : "折叠") + label,
+        onClick: () => toggleSection(key),
+        onKeyDown: (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggleSection(key);
+          }
+        },
+      },
+      h(Icon, { name: collapsed[key] ? "chevron-right" : "chevron-down", size: 11 }),
+      h("span", null, label),
+    );
   const fileView = s.settings.fileView === "flat" ? "flat" : "tree";
   const selected = data.selectedCommit;
   if (!selected) {
@@ -8857,8 +8882,19 @@ function CommitDetail(props) {
     h(
       "div",
       { className: "cg-detail-head" },
-      h("div", { className: "cg-detail-subject" }, commit.subject || "(无提交信息)"),
       h(
+        "div",
+        { className: "cg-detail-subject-row" },
+        h("div", { className: "cg-detail-subject" }, commit.subject || "(无提交信息)"),
+        h(IconBtn, {
+          name: collapsed.head ? "chevron-right" : "chevron-down",
+          label: collapsed.head ? "展开提交信息" : "折叠提交信息",
+          onClick: () => toggleSection("head"),
+        }),
+      ),
+      collapsed.head
+        ? null
+        : h(
         "dl",
         { className: "cg-detail-meta" },
         h("dt", null, "提交"),
@@ -8887,7 +8923,9 @@ function CommitDetail(props) {
             : "（根提交）",
         ),
       ),
-      h(
+      collapsed.head
+        ? null
+        : h(
         "div",
         { className: "cg-actions-row", style: { borderBottom: 0, padding: "0.5rem 0 0" } },
         h(Btn, { size: "sm", icon: "branch", onClick: () => createBranchDialog(repo, selected.hash) }, "新建分支"),
@@ -8908,21 +8946,50 @@ function CommitDetail(props) {
     selected.loading ? h("div", { className: "cg-notice" }, "正在加载提交详情…") : null,
     selected.error ? h(Banner, { tone: "error" }, selected.error) : null,
     selected.body && selected.body !== commit.subject
-      ? h("div", { className: "cg-detail-body" }, selected.body)
+      ? h(
+          appCtx.react.Fragment,
+          null,
+          sectionHead("body", "提交说明"),
+          collapsed.body ? null : h("div", { className: "cg-detail-body" }, selected.body),
+        )
       : null,
     h(
       "div",
-      { style: { display: "flex", alignItems: "center", gap: "0.5rem", padding: "4px 10px", borderBottom: "1px solid var(--cg-border)" } },
-      h("span", { className: "cg-muted cg-mini" }, "变更文件 " + selected.files.length),
+      {
+        className: "cg-detail-section cg-section-toggle",
+        role: "button",
+        tabIndex: 0,
+        "aria-expanded": !collapsed.files,
+        title: collapsed.files ? "展开变更文件" : "折叠变更文件",
+        onClick: () => toggleSection("files"),
+        onKeyDown: (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggleSection("files");
+          }
+        },
+      },
+      h(Icon, { name: collapsed.files ? "chevron-right" : "chevron-down", size: 11 }),
+      h("span", null, "变更文件 " + selected.files.length),
       h("div", { style: { flex: 1 } }),
-      h(
-        "div",
-        { className: "cg-seg", role: "group", "aria-label": "文件视图" },
-        h("button", { type: "button", className: fileView === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
-        h("button", { type: "button", className: fileView === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
-      ),
+      collapsed.files
+        ? null
+        : h(
+            "div",
+            {
+              className: "cg-seg",
+              role: "group",
+              "aria-label": "文件视图",
+              onClick: (event) => event.stopPropagation(),
+              onKeyDown: (event) => event.stopPropagation(),
+            },
+            h("button", { type: "button", className: fileView === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
+            h("button", { type: "button", className: fileView === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
+          ),
     ),
-    h(
+    collapsed.files
+      ? null
+      : h(
       "div",
       { className: "cg-detail-files" },
       selected.files.length

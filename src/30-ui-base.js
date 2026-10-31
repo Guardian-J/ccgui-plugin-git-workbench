@@ -275,11 +275,13 @@ const PLUGIN_CSS = `
 .cg-ref.cg-tag{background:var(--color-status-yellow-background);color:var(--color-status-yellow-text)}
 .cg-ref.cg-remote{background:var(--color-background-tertiary-default);color:var(--color-text-secondary)}
 .cg-detail-head{padding:0.75rem 1rem;border-bottom:1px solid var(--cg-border);flex:none}
-.cg-detail-subject{font-size:0.875rem;font-weight:600;margin-bottom:0.5rem;word-break:break-word}
+.cg-detail-subject-row{display:flex;align-items:flex-start;gap:0.5rem;margin-bottom:0.5rem}
+.cg-detail-subject{flex:1;min-width:0;font-size:0.875rem;font-weight:600;word-break:break-word}
 .cg-detail-meta{display:grid;grid-template-columns:minmax(4rem,max-content) minmax(0,1fr);gap:0.25rem 0.625rem;color:var(--color-text-secondary);font-size:0.75rem}
 .cg-detail-meta dt{color:var(--color-text-tertiary)}
 .cg-detail-meta dd{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cg-detail-body{white-space:pre-wrap;font-family:var(--font-mono);font-size:0.7188rem;padding:0.625rem 1rem;border-bottom:1px solid var(--cg-border);max-height:11.25rem;overflow:auto;background:var(--cg-surface-2);color:var(--color-text-secondary)}
+.cg-detail-body{flex:none;white-space:pre-wrap;font-family:var(--font-mono);font-size:0.7188rem;padding:0.625rem 1rem;border-bottom:1px solid var(--cg-border);max-height:min(42vh,26rem);overflow:auto;background:var(--cg-surface-2);color:var(--color-text-secondary)}
+.cg-detail-section{display:flex;align-items:center;gap:0.5rem;padding:0.4375rem 1rem;font-weight:650;font-size:0.6875rem;letter-spacing:.04em;color:var(--color-text-tertiary);background:var(--cg-surface-2);border-bottom:1px solid var(--cg-border);flex:none}
 .cg-detail-files{flex:none;border-bottom:1px solid var(--cg-border);padding:2px 0}
 .cg-log-detail{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;overflow:auto}
 .cg-actions-row{display:flex;align-items:center;gap:0.375rem;padding:0.4375rem 0.75rem;border-bottom:1px solid var(--cg-border);flex-wrap:wrap;flex:none}
