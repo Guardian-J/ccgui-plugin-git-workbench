@@ -426,8 +426,8 @@ function TagsTab(props) {
                     openContextMenu(rect.left, rect.bottom + 2, [
                       { label: "检出标签", icon: "check", onClick: () => checkoutTag(repo, tag.name) },
                       { label: "基于标签新建分支", icon: "branch", onClick: () => createBranchDialog(repo, tag.name) },
-                      { label: "推送标签", icon: "push", onClick: () => pushTags(repo, [tag.name]) },
-                      { label: "删除远程标签", icon: "server", danger: true, onClick: () => deleteRemoteTag(repo, tag.name) },
+                      { label: "推送标签", icon: "push", disabled: !data.remotes.length, onClick: () => pushTags(repo, [tag.name]) },
+                      { label: "删除远程标签", icon: "server", danger: true, disabled: !data.remotes.length, onClick: () => deleteRemoteTag(repo, tag.name) },
                       { label: "复制标签名", icon: "copy", onClick: () => copyText(tag.name) },
                       { separator: true },
                       { label: "删除本地标签", icon: "trash", danger: true, onClick: () => deleteTag(repo, tag.name) },
@@ -519,7 +519,7 @@ function RemotesTab(props) {
       "div",
       { className: "cg-list-scroll" },
       data.worktrees.length
-        ? data.worktrees.map((item) =>
+        ? data.worktrees.map((item, index) =>
             h(
               "div",
               { key: item.path, className: "cg-list-row" },
@@ -541,7 +541,7 @@ function RemotesTab(props) {
                       onClick: () => setActiveRepo(item.path),
                     })
                   : null,
-                pathKey(item.path) !== pathKey(repo) && !item.bare
+                pathKey(item.path) !== pathKey(repo) && !item.bare && index > 0
                   ? h(IconBtn, { name: "trash", label: "删除工作树", size: 13, onClick: () => removeWorktree(repo, item.path) })
                   : null,
                 h(IconBtn, { name: "copy", label: "复制路径", size: 13, onClick: () => copyText(item.path) }),
@@ -756,7 +756,11 @@ function SettingsForm(props) {
         max: 20,
         value: depth,
         onChange: (event) => setDepth(event.target.value),
-        onBlur: () => save({ scanDepth: Math.max(1, Math.min(20, Number(depth) || 2)) }),
+        onBlur: () => {
+          const clamped = Math.max(1, Math.min(20, Number(depth) || 2));
+          setDepth(String(clamped));
+          save({ scanDepth: clamped });
+        },
       }),
       h("label", null, "排除目录"),
       h("textarea", {
@@ -796,7 +800,11 @@ function SettingsForm(props) {
         max: 300,
         value: interval,
         onChange: (event) => setIntervalValue(event.target.value),
-        onBlur: () => save({ refreshInterval: Math.max(3, Math.min(300, Number(interval) || 8)) }),
+        onBlur: () => {
+          const clamped = Math.max(3, Math.min(300, Number(interval) || 8));
+          setIntervalValue(String(clamped));
+          save({ refreshInterval: clamped });
+        },
       }),
       h("label", null, "日志每页条数"),
       h("input", {
@@ -806,7 +814,11 @@ function SettingsForm(props) {
         max: 200,
         value: pageSize,
         onChange: (event) => setPageSize(event.target.value),
-        onBlur: () => save({ logPageSize: Math.max(20, Math.min(200, Number(pageSize) || 100)) }),
+        onBlur: () => {
+          const clamped = Math.max(20, Math.min(200, Number(pageSize) || 100));
+          setPageSize(String(clamped));
+          save({ logPageSize: clamped });
+        },
       }),
       h("label", null, "差异上下文行数"),
       h("input", {
@@ -816,7 +828,11 @@ function SettingsForm(props) {
         max: 50,
         value: context,
         onChange: (event) => setContext(event.target.value),
-        onBlur: () => save({ diffContext: Math.max(0, Math.min(50, Number.isFinite(Number(context)) ? Number(context) : 3)) }),
+        onBlur: () => {
+          const clamped = Math.max(0, Math.min(50, Number.isFinite(Number(context)) ? Number(context) : 3));
+          setContext(String(clamped));
+          save({ diffContext: clamped });
+        },
       }),
     ),
     h("h3", null, "提交与同步"),

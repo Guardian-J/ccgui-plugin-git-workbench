@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.6";
+const PLUGIN_VERSION = "0.2.7";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -284,6 +284,14 @@ function splitCommandLine(input) {
       continue;
     }
     if (ch === "\\" && quote !== "'") {
+      const next = s[i + 1];
+      // Windows 路径里的反斜杠不是转义符：只有后跟空白、引号或另一个反斜杠时才转义，
+      // 这样 `src\main.js` 不会被吞成 `srcmain.js`，同时保留 `a\ b` 这类 POSIX 写法。
+      if (next !== undefined && !/[\s"'\\]/.test(next)) {
+        cur += ch;
+        has = true;
+        continue;
+      }
       escaped = true;
       continue;
     }
@@ -737,6 +745,19 @@ function decodeUtf8(bytes) {
   }
 }
 
+/**
+ * 严格解码：非法 UTF-8 字节（GBK/GB18030 等）不返回替换字符，而是标记 invalid。
+ * 以非 UTF-8 预览后再按 UTF-8 写回会永久损坏文件，因此调用方必须禁用编辑。
+ */
+function decodeUtf8Strict(bytes) {
+  if (!bytes || !bytes.length) return { text: "", invalid: false };
+  try {
+    return { text: new TextDecoder("utf-8", { fatal: true }).decode(bytes), invalid: false };
+  } catch (error) {
+    return { text: "", invalid: true };
+  }
+}
+
 function bytesHaveNul(bytes) {
   for (let i = 0; i < bytes.length; i += 1) if (bytes[i] === 0) return true;
   return false;
@@ -814,10 +835,12 @@ async function readWorkspaceFile(path, options) {
     }
   }
   const binary = bytesHaveNul(merged);
+  const decoded = binary ? { text: "", invalid: false } : decodeUtf8Strict(merged);
   return {
-    text: binary ? "" : decodeUtf8(merged),
+    text: decoded.text,
     bytes: merged,
-    binary,
+    // 非 UTF-8 文本不能安全写回，按二进制处理（UI 会禁用预览与编辑）。
+    binary: binary || decoded.invalid,
     size: merged.length,
     truncated: readFailed || truncated,
   };
@@ -854,12 +877,31 @@ async function writeWorkspaceFile(path, text, options) {
   const windows = shellIsWindows({ CCGIT_FILE: path });
   const chunks = chunkText(text, windows ? 12000 : 24000);
   if (!chunks.length) chunks.push("");
-  for (let i = 0; i < chunks.length; i += 1) {
-    const append = Boolean(opts.append) || i > 0;
+  const writeChunk = async (target, chunk, append) => {
     await runShell(windows ? powershellWriteScript(append) : posixWriteScript(append), {
-      CCGIT_FILE: toSlash(path),
-      CCGIT_CHUNK: chunks[i],
+      CCGIT_FILE: toSlash(target),
+      CCGIT_CHUNK: chunk,
     }, { description: "写入文件", timeoutMs: 30000, silent: true });
+  };
+  if (opts.append) {
+    for (const chunk of chunks) await writeChunk(path, chunk, true);
+    return true;
+  }
+  // 分块写直接作用于目标文件时，任一块失败就只剩半截内容；先写临时文件再整体替换。
+  const tmp = path + ".cg-tmp";
+  try {
+    for (let i = 0; i < chunks.length; i += 1) await writeChunk(tmp, chunks[i], i > 0);
+    const move = windows
+      ? "Move-Item -LiteralPath $env:CCGIT_TMP -Destination $env:CCGIT_FILE -Force"
+      : 'mv -f "$CCGIT_TMP" "$CCGIT_FILE"';
+    await runShell(move, { CCGIT_TMP: toSlash(tmp), CCGIT_FILE: toSlash(path) }, {
+      description: "替换文件",
+      timeoutMs: 30000,
+      silent: true,
+    });
+  } catch (error) {
+    await removeWorkspaceFile(tmp);
+    throw error;
   }
   return true;
 }
@@ -898,7 +940,8 @@ function normalizeExcludes(raw) {
   // 只拒绝控制字符（会破坏脚本与输出分隔）与超长项。
   return Array.from(new Set(
     String(raw || "")
-      .split(",")
+      // 设置页是多行文本框：逗号与换行都当作分隔符，避免整行含控制字符被丢弃。
+      .split(/[\n,]/)
       .map((item) => item.trim())
       .filter((item) =>
         item &&
@@ -988,7 +1031,7 @@ async function scanGitRoots(roots, settings) {
     seenRoot.add(key);
     list.push(normalized);
   }
-  if (!list.length) return [];
+  if (!list.length) return { roots: [], truncated: false };
   const depth = Math.max(1, Math.min(20, Number(settings.scanDepth) || 2));
   const excludes = normalizeExcludes(settings.scanExclude);
   const windows = isWindows() || list.some((root) => looksWindowsPath(root));
@@ -1001,8 +1044,11 @@ async function scanGitRoots(roots, settings) {
   }
   const found = [];
   const seen = new Set();
+  const raw = String(res.stdout || "").replace(/^\uFEFF/, "");
+  // 每对记录都以 NUL 收尾；末尾缺 NUL 或长度触顶说明输出被宿主截断。
+  const truncated = raw.length >= GIT_MAX_OUTPUT - 64 || (raw.length > 0 && !raw.endsWith("\0"));
   // owner 与 .git 路径按 NUL 成对输出；目录名含换行/制表符也不会错位。
-  const tokens = String(res.stdout || "").replace(/^\uFEFF/, "").split("\0");
+  const tokens = raw.split("\0");
   for (let i = 0; i + 1 < tokens.length; i += 2) {
     const owner = normalizePath(tokens[i]);
     const gitPath = toSlash(tokens[i + 1]);
@@ -1015,7 +1061,7 @@ async function scanGitRoots(roots, settings) {
     seen.add(key);
     found.push({ owner: owner || normalizePath(root), path: normalizePath(root) });
   }
-  return found;
+  return { roots: found, truncated };
 }
 
 /** 并发探测一组路径所在的 Git 仓库根（只跑 git rev-parse，不做目录遍历）。 */
@@ -1188,7 +1234,11 @@ async function discoverRepos(workspacePath, settings, options) {
       ]),
     );
     try {
-      for (const item of await scanGitRoots(deepTargets.map((target) => target.path), settings)) {
+      const scan = await scanGitRoots(deepTargets.map((target) => target.path), settings);
+      if (scan.truncated) {
+        errors.push("仓库扫描输出达到 64KB 上限，部分仓库可能未列出；请减小扫描深度或增加排除目录。");
+      }
+      for (const item of scan.roots) {
         const meta = metaByRoot.get(pathKey(item.owner)) || { source: "scan", owner: item.owner };
         add(item.path, meta.source, meta.owner);
       }
@@ -1221,7 +1271,7 @@ async function discoverRepos(workspacePath, settings, options) {
 
 /** 快速摘要：分支/上游/变更数量，用于仓库列表与状态栏。 */
 async function loadQuickStatus(repoPath) {
-  let res = await runGit(repoPath, ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"], {
+  let res = await runGit(repoPath, ["-c", "status.aheadBehind=true", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"], {
     allowFailure: true,
     timeoutMs: 20000,
   });
@@ -1301,7 +1351,8 @@ function emptyStatus() {
 function parseStatusPorcelain(raw, stderr, version) {
   const text = String(raw || "");
   const status = emptyStatus();
-  status.truncated = text.length >= GIT_MAX_OUTPUT - 64;
+  // 字节数是宿主上限，字符数只在小输出上等价；末尾不是 NUL 说明记录被切断。
+  status.truncated = text.length >= GIT_MAX_OUTPUT - 64 || (text.length > 0 && !text.endsWith("\0"));
   const looksV1 = /^## /.test(text.replace(/^\uFEFF/, ""));
   const looksV2 = /(^|\0)# branch\.|(^|\0)[12u?] /.test(text);
   if (looksV1 && !looksV2) return parseStatusV1(text, status);
@@ -1319,11 +1370,13 @@ function pushStatusEntry(status, entry) {
 function parseStatusV2(text, status) {
   const tokens = text.split("\0");
   let index = 0;
+  let sawAb = false;
   while (index < tokens.length) {
     const token = tokens[index];
     index += 1;
     if (!token) continue;
     if (token[0] === "#") {
+      if (token.startsWith("# branch.ab ")) sawAb = true;
       parseStatusHeaderLine(token, status.branch);
       continue;
     }
@@ -1378,6 +1431,8 @@ function parseStatusV2(text, status) {
     if (token[0] === "!") continue; // ignored: 默认不展示
   }
   status.format = "v2";
+  // porcelain v2 没有 v1 的 [gone] 标记：有上游却没有 branch.ab 即上游引用已不存在。
+  if (status.branch.upstream && !sawAb) status.branch.upstreamGone = true;
   return status;
 }
 
@@ -1710,7 +1765,8 @@ function gitDiffHeaderPaths(header) {
 /** 解析统一 diff；返回每个文件的 hunk / 行号，供渲染与按 hunk 暂存。 */
 function parseUnifiedDiff(raw) {
   const text = String(raw || "");
-  const lines = splitLines(text);
+  // 不能走 splitLines：它会把 CRLF 归一成 LF，重建补丁时丢掉正文里的 \r。
+  const lines = text.split("\n");
   const files = [];
   let file = null;
   let hunk = null;
@@ -1796,7 +1852,7 @@ function parseUnifiedDiff(raw) {
       continue;
     }
     const prefix = line[0];
-    const content = line.slice(1);
+    const content = rawLine.slice(1);
     if (prefix === "+") {
       hunk.lines.push({ kind: "add", text: content, oldNo: null, newNo });
       newNo += 1;
@@ -1812,7 +1868,9 @@ function parseUnifiedDiff(raw) {
       oldNo += 1;
       newNo += 1;
     } else if (line === "") {
-      hunk.lines.push({ kind: "ctx", text: "", oldNo: null, newNo: null });
+      // splitLines 在末尾换行后产生的空串不是 diff 正文；真正的空行带一个空格前缀。
+      // 计入 hunk 会让 patch 头行数多 1，git apply 直接失败。
+      continue;
     } else {
       hunk.lines.push({ kind: "meta", text: line, oldNo: null, newNo: null });
     }
@@ -1957,6 +2015,7 @@ function allDirPaths(nodes, out) {
 const state = {
   rev: 0,
   ready: false,
+  settingsLoadFailed: false,
   settings: Object.assign({}, DEFAULT_SETTINGS),
   workspacePath: "",
   workspaceName: "",
@@ -2110,6 +2169,8 @@ async function loadSettings() {
     saved = await appCtx.storage.get("settings");
   } catch (error) {
     saved = null;
+    // 读不到旧设置时默认值不可信，后续保存会把默认值写回去覆盖用户配置。
+    state.settingsLoadFailed = true;
   }
   if (saved && typeof saved === "object" && !Array.isArray(saved)) {
     state.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
@@ -2148,6 +2209,10 @@ async function loadSettings() {
 }
 
 async function saveSettings(patch) {
+  if (state.settingsLoadFailed) {
+    toast("设置读取失败，已阻止覆盖；请重启插件后重试。", "error");
+    return;
+  }
   state.settings = Object.assign({}, state.settings, patch || {});
   if (patch && Object.prototype.hasOwnProperty.call(patch, "signOff")) state.commitSignOff = Boolean(patch.signOff);
   if (patch && Object.prototype.hasOwnProperty.call(patch, "skipHooks")) state.commitSkipHooks = Boolean(patch.skipHooks);
@@ -2546,8 +2611,7 @@ async function loadQuickStatusFor(path) {
     data.quick = quick;
     data.quickAt = Date.now();
     if (quick.error) data.error = quick.error;
-    if (state.activeRepo === key) notify();
-    else notify();
+    notify();
   } catch (error) {
     data.quick = { error: safeError(error) };
     data.quickAt = Date.now();
@@ -2579,7 +2643,7 @@ async function loadRepoStatus(path, force) {
     try {
       const res = await runGit(
         key,
-        ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"],
+        ["-c", "status.aheadBehind=true", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"],
         { allowFailure: true, timeoutMs: 30000 },
       );
       let parsed;
@@ -2682,14 +2746,16 @@ function computeStatusSignature(status) {
 }
 
 /**
- * 按行记录的输出若触达 64KB 上限，最后一行可能被截断：丢弃最后一个换行之后的残片。
- * 返回 {text, truncated}。
+ * git log 用 %x1e 分隔记录；输出触达 64KB 上限时最后一条可能被切断。
+ * 返回 {text, truncated}，text 只保留完整的记录。
  */
 function clipTruncatedLines(stdout) {
   const text = String(stdout || "");
-  if (text.length < GIT_MAX_OUTPUT - 64) return { text, truncated: false };
-  const cut = text.lastIndexOf("\n");
-  return { text: cut >= 0 ? text.slice(0, cut) : "", truncated: true };
+  const nearLimit = text.length >= GIT_MAX_OUTPUT - 64;
+  const complete = !text.length || text.endsWith("\x1e");
+  if (!nearLimit && complete) return { text, truncated: false };
+  const cut = text.lastIndexOf("\x1e");
+  return { text: cut >= 0 ? text.slice(0, cut + 1) : "", truncated: true };
 }
 
 function syncCheckedFiles(repo, status) {
@@ -2717,6 +2783,7 @@ async function loadOperations(repo) {
   const data = ensureRepoData(repo);
   const gitDir = data.gitDir || (await resolveGitDir(repo));
   const operations = { merge: false, cherryPick: false, revert: false, bisect: false, rebase: false };
+  let operationsError = null;
   if (gitDir) {
     // 一次 shell 检查全部状态文件，避免轮询时反复启动 4 个 git 进程。
     const script = shellIsWindows({ CCGIT_GITDIR: gitDir })
@@ -2735,12 +2802,16 @@ async function loadOperations(repo) {
         operations.revert = parts[2] === "1";
         operations.bisect = parts[3] === "1";
         operations.rebase = parts[4] === "1";
+      } else {
+        operationsError = "无法识别进行中的 Git 操作检测结果";
       }
     } catch (error) {
-      // 检测失败时保持全部 false；后续操作会由 git 自身报错。
+      // 检测失败时保持全部 false；后续操作会由 git 自身报错，但界面要提示检测不可用。
+      operationsError = safeError(error);
     }
   }
   data.operations = operations;
+  data.operationsError = operationsError;
   notify();
 }
 
@@ -2898,7 +2969,8 @@ async function loadLog(path, reset, options) {
         notify();
         return;
       }
-      const commits = parseLog(res.stdout);
+      const clipped = clipTruncatedLines(res.stdout);
+      const commits = parseLog(clipped.text);
       if (reset) {
         view.commits = commits;
       } else {
@@ -2910,10 +2982,10 @@ async function loadLog(path, reset, options) {
         ensureRepoData(key).selectedCommit = null;
       }
       view.offset += commits.length;
-      view.hasMore = commits.length >= pageSize;
+      view.hasMore = commits.length >= pageSize || clipped.truncated;
       view.loading = false;
       view.error = null;
-      view.truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64;
+      view.truncated = clipped.truncated;
       notify();
     } catch (error) {
       view.loading = false;
@@ -3223,19 +3295,23 @@ async function discardPaths(repo, entries) {
   const list = entries && entries.length ? entries : [];
   if (!list.length) return { ok: true };
   const names = list.map((entry) => entry.path);
+  const untrackedOnly = list.every((entry) => entry.code === "?" && !entry.staged);
   const confirmed = await confirmDestructive({
-    title: "回滚更改",
-    message: "将丢弃 " + names.length + " 个文件的本地更改，且不可恢复。",
+    title: untrackedOnly ? "删除未跟踪文件" : "回滚更改",
+    message: untrackedOnly
+      ? "将永久删除 " + names.length + " 个未跟踪文件，且无法从 Git 恢复。"
+      : "将丢弃 " + names.length + " 个文件的本地更改，且不可恢复。",
     detail: names.slice(0, 12).join("\n") + (names.length > 12 ? "\n…" : ""),
-    confirmLabel: "回滚",
+    confirmLabel: untrackedOnly ? "删除" : "回滚",
     danger: true,
   });
   if (!confirmed) return { ok: false, canceled: true };
-  return perform(repo, "回滚更改", async () => {
+  return perform(repo, untrackedOnly ? "删除未跟踪文件" : "回滚更改", async () => {
     const untracked = [];
     const added = [];
     const restoreFromIndex = [];
     const restoreFromHead = [];
+    const resetStagedOnly = [];
     const handled = new Set();
     const fullStatus = ensureRepoData(repo).status;
     const allEntries = fullStatus.staged.concat(
@@ -3293,10 +3369,14 @@ async function discardPaths(repo, entries) {
         continue;
       }
       if (entry.code === "?" || (entry.staged && entry.x === "A")) {
-        if (entry.staged) added.push(entry.path);
+        const hasUnstagedSamePath = fullStatus.unstaged.some((item) => item.path === entry.path);
+        if (entry.staged && hasUnstagedSamePath) resetStagedOnly.push(entry.path);
+        else if (entry.staged) added.push(entry.path);
         else untracked.push(entry.path);
       } else if (entry.staged) {
-        restoreFromHead.push(entry.path);
+        // `checkout HEAD --` 会同时覆盖工作区；同文件还有未暂存改动时必须只重置索引。
+        if (fullStatus.unstaged.some((item) => item.path === entry.path)) resetStagedOnly.push(entry.path);
+        else restoreFromHead.push(entry.path);
       } else {
         // 未暂存改动只回滚到索引版本；若同一文件还有已暂存内容，不能连带清掉。
         restoreFromIndex.push(entry.path);
@@ -3317,6 +3397,13 @@ async function discardPaths(repo, entries) {
       });
       if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
     }
+    if (resetStagedOnly.length) {
+      let reset = await runGit(repo, ["reset", "-q", "HEAD", "--"].concat(resetStagedOnly), { allowFailure: true });
+      if (reset.code !== 0 && !(await hasHeadCommit(repo))) {
+        reset = await runGit(repo, ["rm", "-r", "--cached", "--quiet", "--"].concat(resetStagedOnly), { allowFailure: true });
+      }
+      if (reset.code !== 0) throw new GitCommandError((reset.stderr || reset.stdout || "").trim(), reset.entry);
+    }
     if (restoreFromHead.length) {
       const hasHead = await hasHeadCommit(repo);
       const args = hasHead ? ["checkout", "HEAD", "--"] : ["checkout", "--"];
@@ -3332,7 +3419,7 @@ async function discardPaths(repo, entries) {
       if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
     }
     return { count: list.length };
-  }, { success: "已回滚 " + names.length + " 个文件", details: false });
+  }, { success: untrackedOnly ? "已删除 " + names.length + " 个未跟踪文件" : "已回滚 " + names.length + " 个文件", details: false });
 }
 
 async function hasHeadCommit(repo) {
@@ -3448,6 +3535,11 @@ async function commitChanges(repo, options) {
     return { ok: false };
   }
   const selected = selectedRaw;
+  // 勾选是提交范围的唯一依据：空勾选时不能悄悄退化成「提交全部已暂存」。
+  if (!selected.length && !opts.amend && !opts.allowEmpty) {
+    toast("请先勾选要提交的文件", "error");
+    return { ok: false };
+  }
   // 提交路径：已暂存的重命名需要同时带上旧路径，--only 才能把删除一并写入提交。
   const paths = expandRenamePaths(
     repo,
@@ -3602,7 +3694,7 @@ async function ensureFileDiff(repo, entry, mode, force) {
         throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
       }
       result.text = res.stdout;
-      result.truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64;
+      result.truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64 || (res.stdout.length > 0 && !res.stdout.endsWith("\n"));
       result.files = parseUnifiedDiff(res.stdout);
     }
     result.loading = false;
@@ -3778,6 +3870,26 @@ async function exportPatch(repo, scope) {
   }, { refresh: false, success: "补丁已导出" });
 }
 
+/**
+ * `git apply --3way` 会隐式写索引。对比应用前后的暂存差异，只 reset 新出现的路径，
+ * 返回未能恢复的路径（空数组表示成功或无需恢复）。
+ */
+async function restoreIndexAfterThreeWay(repo, stagedBefore) {
+  const afterRes = await runGit(repo, ["diff", "--cached", "--name-only", "-z"], {
+    allowFailure: true,
+    timeoutMs: 30000,
+  });
+  if (afterRes.code !== 0) return [];
+  const stagedAfter = new Set(String(afterRes.stdout || "").split("\u0000").filter(Boolean));
+  const newlyStaged = Array.from(stagedAfter).filter((path) => !stagedBefore.has(path));
+  if (!newlyStaged.length) return [];
+  const reset = await runGit(repo, ["reset", "-q", "HEAD", "--"].concat(newlyStaged), {
+    allowFailure: true,
+    timeoutMs: 30000,
+  });
+  return reset.code === 0 ? [] : newlyStaged;
+}
+
 async function applyPatch(repo) {
   const target = await promptDialog({
     title: "应用补丁",
@@ -3831,22 +3943,19 @@ async function applyPatch(repo) {
     if (target.threeWay) args.push("--3way");
     args.push("--", patchPath);
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: 120000 });
-    if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
+    if (res.code !== 0) {
+      // --3way 失败也可能已写入索引（冲突条目）：先恢复应用前的暂存状态，再报原始错误。
+      if (target.threeWay) {
+        const failed = await restoreIndexAfterThreeWay(repo, stagedBefore);
+        if (failed.length) toast("补丁应用失败，且索引未完全恢复：" + failed.slice(0, 5).join(", "), "warning");
+      }
+      throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
+    }
     if (target.threeWay) {
       // --3way 隐式使用 --index；用应用前后的暂存差异精确找出新写入的路径，避免误动原有暂存。
-      const afterRes = await runGit(repo, ["diff", "--cached", "--name-only", "-z"], {
-        allowFailure: true,
-        timeoutMs: 30000,
-      });
-      const stagedAfter = new Set(String(afterRes.stdout || "").split("\u0000").filter(Boolean));
-      const newlyStaged = Array.from(stagedAfter).filter((path) => !stagedBefore.has(path));
-      if (!newlyStaged.length) return;
-      const reset = await runGit(repo, ["reset", "-q", "HEAD", "--"].concat(newlyStaged), {
-        allowFailure: true,
-        timeoutMs: 30000,
-      });
-      if (reset.code !== 0) {
-        throw new GitCommandError("补丁已应用，但取消暂存失败：" + (reset.stderr || "").trim(), reset.entry);
+      const failed = await restoreIndexAfterThreeWay(repo, stagedBefore);
+      if (failed.length) {
+        throw new GitCommandError("补丁已应用，但取消暂存失败：" + failed.slice(0, 5).join(", "), null);
       }
     }
   }, { success: "补丁已应用", details: true });
@@ -4001,8 +4110,18 @@ async function loadBlame(repo, path, start) {
       throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
     }
     const lines = parseBlamePorcelain(res.stdout);
+    const truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64 || (res.stdout.length > 0 && !res.stdout.endsWith("\n"));
+    let maxLine = 0;
+    for (let i = 0; i < lines.length; i += 1) if (lines[i]) maxLine = i;
     if (!state.blame || state.blame.token !== token) return;
-    state.blame = Object.assign({}, state.blame, { lines, loading: false, error: null });
+    state.blame = Object.assign({}, state.blame, {
+      lines,
+      truncated,
+      // 本段没填满，说明已经到文件末尾，禁用“下一段”。
+      exhausted: maxLine < rangeEnd,
+      loading: false,
+      error: null,
+    });
     notify();
   } catch (error) {
     const message = safeError(error);
@@ -4131,12 +4250,22 @@ async function pullRepo(repo, options) {
       }
       throw new GitCommandError(message, res.entry);
     }
-    return { conflict: false, message: (res.stdout || res.stderr || "").trim() };
+    const output = (res.stdout || res.stderr || "").trim();
+    // --autostash 回放冲突时 git pull 仍以 0 退出，但工作区已留下冲突与未清理的 autostash。
+    if (/resulted in conflicts/i.test(output)) {
+      return { conflict: true, autostash: true, message: output };
+    }
+    return { conflict: false, message: output };
   }, { refresh: false, errorPrefix: "拉取失败" }).then(async (result) => {
     if (!result.ok) return result;
     await refreshRepo(repo, { details: true, log: true, quick: true });
-    if (result.value && result.value.conflict) toast("拉取产生冲突，请在“本地更改”中解决", "warning");
-    else toast("拉取完成", "success");
+    if (result.value && result.value.autostash) {
+      toast("拉取完成，但自动贮藏回放冲突：请解决冲突，贮藏仍保留在 stash 中", "warning");
+    } else if (result.value && result.value.conflict) {
+      toast("拉取产生冲突，请在“本地更改”中解决", "warning");
+    } else {
+      toast("拉取完成", "success");
+    }
     return result;
   });
 }
@@ -4409,11 +4538,16 @@ async function rebaseBranch(repo, onto) {
       if (/CONFLICT|conflict|Resolve all conflicts/i.test(output)) return { conflict: true, output };
       throw new GitCommandError(output, res.entry);
     }
+    if (/resulted in conflicts/i.test(output)) return { conflict: true, autostash: true, output };
     return { conflict: false, output };
   }, { refresh: false, errorPrefix: "变基失败" }).then(async (result) => {
     if (!result.ok) return result;
     await refreshRepo(repo, { details: true, log: true, quick: true });
-    toast(result.value.conflict ? "变基产生冲突，请解决后继续" : "变基完成", result.value.conflict ? "warning" : "success");
+    if (result.value.autostash) {
+      toast("变基完成，但自动贮藏回放冲突：请解决冲突，贮藏仍保留在 stash 中", "warning");
+    } else {
+      toast(result.value.conflict ? "变基产生冲突，请解决后继续" : "变基完成", result.value.conflict ? "warning" : "success");
+    }
     return result;
   });
 }
@@ -4652,6 +4786,7 @@ async function squashLast(repo, count, message) {
   });
   if (!confirmed) return { ok: false };
   return perform(repo, "压缩提交", async () => {
+    const oldHead = await runGit(repo, ["rev-parse", "HEAD"], { allowFailure: true, timeoutMs: 10000 });
     const reset = await runGit(repo, ["reset", "--soft", "HEAD~" + n], {
       allowFailure: true,
       timeoutMs: 30000,
@@ -4661,7 +4796,13 @@ async function squashLast(repo, count, message) {
       allowFailure: true,
       timeoutMs: 120000,
     });
-    if (commit.code !== 0) throw new GitCommandError((commit.stderr || commit.stdout || "").trim(), commit.entry);
+    if (commit.code !== 0) {
+      // 提交失败（钩子拒绝等）时把分支指针放回原处，避免历史被静默回退。
+      if (oldHead.code === 0 && oldHead.stdout.trim()) {
+        await runGit(repo, ["reset", "--soft", oldHead.stdout.trim()], { allowFailure: true, timeoutMs: 30000 });
+      }
+      throw new GitCommandError((commit.stderr || commit.stdout || "").trim(), commit.entry);
+    }
   }, { success: "已压缩 " + n + " 个提交", details: true, log: true, quick: true });
 }
 
@@ -4765,6 +4906,10 @@ async function skipOperation(repo) {
 }
 
 async function resolveConflict(repo, path, side) {
+  if (side !== "ours" && side !== "theirs") {
+    toast("未知的冲突解决方式", "error");
+    return { ok: false };
+  }
   return perform(repo, "解决冲突", async () => {
     const res = await runGit(repo, ["checkout", "--" + side, "--", path], {
       allowFailure: true,
@@ -4822,6 +4967,16 @@ async function stashDialog(repo) {
 }
 
 async function stashApply(repo, selector, action) {
+  if (action !== "apply" && action !== "pop" && action !== "drop") {
+    toast("未知的贮藏操作", "error");
+    return { ok: false };
+  }
+  // stash@{n} 会随删除/新建整体位移：操作前用 hash 确认仍是列表里的同一条。
+  const expected = ensureRepoData(repo).stashes.find((item) => item.selector === selector);
+  if (!expected) {
+    toast("贮藏列表已变化，请刷新后重试", "warning");
+    return { ok: false };
+  }
   if (action === "drop") {
     const confirmed = await confirmDestructive({
       title: "删除贮藏",
@@ -4832,6 +4987,10 @@ async function stashApply(repo, selector, action) {
     if (!confirmed) return { ok: false };
   }
   return perform(repo, action === "pop" ? "应用并删除贮藏" : action === "drop" ? "删除贮藏" : "应用贮藏", async () => {
+    const current = await runGit(repo, ["rev-parse", "--verify", selector], { allowFailure: true, timeoutMs: 10000 });
+    if (current.code !== 0 || current.stdout.trim() !== expected.hash) {
+      throw new Error("贮藏列表已变化，请刷新后重试");
+    }
     const res = await runGit(repo, ["stash", action, selector], {
       allowFailure: true,
       timeoutMs: 120000,
@@ -4852,7 +5011,11 @@ async function stashApply(repo, selector, action) {
 
 async function stashBranch(repo, selector) {
   const stash = ensureRepoData(repo).stashes.find((item) => item.selector === selector);
-  const suffix = stash ? shortHash(stash.hash) : "new";
+  if (!stash) {
+    toast("贮藏列表已变化，请刷新后重试", "warning");
+    return { ok: false };
+  }
+  const suffix = shortHash(stash.hash);
   const values = await promptDialog({
     title: "从贮藏创建分支",
     fields: [{ key: "name", label: "新分支名", value: "stash/" + suffix }],
@@ -4865,6 +5028,10 @@ async function stashBranch(repo, selector) {
     return { ok: false };
   }
   return perform(repo, "从贮藏创建分支", async () => {
+    const current = await runGit(repo, ["rev-parse", "--verify", selector], { allowFailure: true, timeoutMs: 10000 });
+    if (current.code !== 0 || current.stdout.trim() !== stash.hash) {
+      throw new Error("贮藏列表已变化，请刷新后重试");
+    }
     const res = await runGit(repo, ["stash", "branch", String(values.name).trim(), selector], {
       allowFailure: true,
       timeoutMs: 120000,
@@ -5267,7 +5434,9 @@ async function setConfigDialog(repo) {
 /* ---------- 控制台 ---------- */
 
 async function runConsoleCommand(repo, input) {
-  const args = splitCommandLine(input);
+  const parsed = splitCommandLine(input);
+  // 用户常直接粘贴 `git status`：去掉可选的 git 前缀，避免拼成 `git ... git status`。
+  const args = parsed.length && parsed[0].toLowerCase() === "git" ? parsed.slice(1) : parsed;
   if (!args.length) return { ok: false };
   return perform(repo, "执行 git " + args[0], async () => {
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: NETWORK_TIMEOUT_MS });
@@ -5328,7 +5497,7 @@ const PLUGIN_CSS = `
 [data-plugin-overlay-host].cg-overlay-raised{z-index:100}
 .cg-workbench-modal>.cg-root{flex:1;width:100%;min-width:0}
 .cg-workbench-close{flex:none}
-.cg-header{display:flex;align-items:center;gap:0.625rem;padding:0.5rem 0.75rem 0.5rem 0.875rem;border-bottom:1px solid var(--cg-border);flex:none;min-height:3.25rem;background:var(--cg-surface)}
+.cg-header{display:flex;align-items:center;gap:0.625rem;padding:0.5rem 0.75rem 0.5rem 0.875rem;border-bottom:1px solid var(--cg-border);flex:none;flex-wrap:wrap;min-height:3.25rem;background:var(--cg-surface)}
 .cg-header-title{display:flex;align-items:center;gap:0.5rem;font-size:0.8125rem;font-weight:600;min-width:0}
 .cg-header-title>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cg-brand{display:inline-flex;align-items:center;justify-content:center;width:1.75rem;height:1.75rem;flex:none;border-radius:0.5rem;background:var(--cg-accent-soft);color:var(--cg-accent-text)}
@@ -5538,7 +5707,7 @@ const PLUGIN_CSS = `
 
 /* ---------- 提交图 ---------- */
 .cg-log{flex:1;min-height:0;display:flex;background:var(--cg-surface)}
-.cg-log-list{flex:0 1 56%;width:auto;min-width:min(18.75rem,45%);max-width:70%;border-right:1px solid var(--cg-border);display:flex;flex-direction:column;min-height:0}
+.cg-log-list{flex:0 1 56%;width:auto;min-width:min(18.75rem,45%);max-width:70%;border-right:1px solid var(--cg-border);display:flex;flex-direction:column;min-height:0;container-type:inline-size}
 .cg-log-scroll{flex:1;overflow:auto;min-height:0;padding:2px 0}
 .cg-commit-row{display:flex;align-items:center;gap:0.625rem;height:1.875rem;padding:0 0.75rem 0 0.5rem;cursor:pointer;min-width:0;transition:background 100ms ease}
 .cg-commit-row:hover{background:var(--cg-hover)}
@@ -5679,7 +5848,7 @@ const PLUGIN_CSS = `
 
 /* ---------- 杂项 ---------- */
 .cg-kbd{font-family:var(--font-mono);font-size:0.625rem;border:1px solid var(--cg-border);border-radius:0.3125rem;padding:1px 0.3125rem;color:var(--color-text-tertiary);background:var(--cg-surface-2)}
-.cg-file-dot{width:0.4375rem;height:0.4375rem;border-radius:99px;flex:none}
+.cg-file-dot{width:0.4375rem;height:0.4375rem;border-radius:999px;flex:none}
 .cg-hr{border:0;border-top:1px solid var(--cg-border);margin:0}
 .cg-wrap{white-space:pre-wrap;word-break:break-word}
 .cg-hidden{display:none!important}
@@ -5913,9 +6082,11 @@ function TabBar(props) {
   );
 }
 
-/** 工作台与其菜单、确认框共用覆盖层，内层浮层始终显示在全屏工作台上方。 */
+/** 工作台与其菜单、确认框、差异弹窗共用覆盖层，内层浮层始终显示在全屏工作台上方。 */
 function workbenchFocusScope(root) {
-  return (state.dialog && root.querySelector(".cg-dialog")) || root;
+  if (state.diffDialog) return root.querySelector(".cg-diff-modal") || root;
+  if (state.dialog) return root.querySelector(".cg-dialog") || root;
+  return root;
 }
 
 function workbenchFocusables(root) {
@@ -5953,7 +6124,7 @@ function OverlayHost() {
       document.body.style.overflow = previousOverflow;
       if (previousFocus && previousFocus.isConnected && typeof previousFocus.focus === "function") previousFocus.focus();
     };
-  }, [s.workbenchOpen]);
+  }, [s.workbenchOpen, Boolean(s.diffDialog)]);
   // :has() 需要 Chromium 105+；旧 WebView 上改为直接标记宿主覆盖层容器。
   useEffect(() => {
     if (!s.workbenchOpen && !s.dialog) return;
@@ -6176,7 +6347,7 @@ function ToastHost() {
   if (!s.toasts.length) return null;
   return h(
     "div",
-    { className: "cg-toasts" },
+    { className: "cg-toasts", role: "status", "aria-live": "polite" },
     s.toasts.map((item) =>
       h(
         "div",
@@ -6494,7 +6665,7 @@ function WorkbenchTabs() {
   const tabs = [
     { key: "changes", label: "本地更改", icon: "edit", count: dirty || null },
     { key: "log", label: "提交图", icon: "commit" },
-    { key: "branches", label: "分支", icon: "branch", count: data.branches.length || null },
+    { key: "branches", label: "分支", icon: "branch", count: (data.branches.locals.length + data.branches.remotes.length) || null },
     showStashes ? { key: "stashes", label: "贮藏", title: "贮藏（Stash）", sub: true, count: data.stashes.length || null } : null,
     { key: "tags", label: "标签", sub: true, count: data.tags.length || null },
     { key: "remotes", label: "远程", sub: true, count: data.remotes.length || null },
@@ -6784,6 +6955,9 @@ function FileFilterBar(props) {
 function OperationBanner(props) {
   const h = appCtx.react.createElement;
   const ops = props.data.operations;
+  if (props.data.operationsError) {
+    return h(Banner, { tone: "error" }, "无法检测进行中的 Git 操作：" + props.data.operationsError);
+  }
   if (!ops.merge && !ops.rebase && !ops.cherryPick && !ops.revert) return null;
   const label = ops.rebase ? "变基" : ops.merge ? "合并" : ops.cherryPick ? "拣选（Cherry-pick）" : "还原（Revert）";
   return h(
@@ -6843,7 +7017,15 @@ function ChangesToolbar(props) {
           "div",
           { className: "cg-tgroup" },
           hasUnstaged ? h(Btn, { size: "sm", icon: "plus", onClick: () => stageAll(repo) }, "全部暂存") : null,
-          hasStaged ? h(Btn, { size: "sm", icon: "minus", onClick: () => unstageAll(repo) }, "全部取消") : null,
+          hasStaged
+            ? h(Btn, {
+                size: "sm",
+                icon: "minus",
+                disabled: data.status.conflicted.length > 0,
+                title: data.status.conflicted.length ? "存在未解决冲突，无法全部取消暂存" : "",
+                onClick: () => unstageAll(repo),
+              }, "全部取消")
+            : null,
         )
       : null,
     h("div", { className: "cg-header-sep" }),
@@ -6929,7 +7111,7 @@ function FileTree(props) {
           {
             key: "d:" + groupKey + ":" + node.path,
             className: "cg-row cg-tree-row",
-            style: { paddingLeft: 6 + depth * 12 + "px" },
+            style: { paddingLeft: 0.375 + depth * 0.75 + "rem" },
             title: node.path,
             onClick: () => toggleDir(repo, node.path),
           },
@@ -6977,7 +7159,7 @@ function FileRow(props) {
     { label: "复制路径", icon: "copy", onClick: () => copyText(entry.path) },
     { label: "添加到 .gitignore", icon: "file", onClick: () => addToGitignore(repo, [entry.path]) },
   ];
-  if (entry.code !== "?" && !entry.unmerged) {
+  if (entry.code !== "?" && !entry.unmerged && !(entry.staged && entry.x === "D")) {
     menuItems.push(
       { separator: true },
       { label: "标记为未更改", icon: "eye", onClick: () => setAssumeUnchanged(repo, [entry.path], true) },
@@ -7004,7 +7186,7 @@ function FileRow(props) {
     "div",
     {
       className: cx("cg-row cg-tree-row", selected ? "cg-selected" : ""),
-      style: { paddingLeft: 6 + (depth + 1) * 12 + "px" },
+      style: { paddingLeft: 0.375 + (depth + 1) * 0.75 + "rem" },
       onClick: open,
       onContextMenu: (event) => {
         event.preventDefault();
@@ -7104,9 +7286,13 @@ function ContextMenuHost() {
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onDown, true);
+    window.addEventListener("blur", onDown);
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onDown, true);
+      window.removeEventListener("blur", onDown);
     };
   }, [contextMenuState]);
   if (!contextMenuState) return null;
@@ -7178,7 +7364,13 @@ function DiffPane(props) {
   return h(
     "div",
     { className: "cg-diffcol" },
-    h(FileDiffView, { repo, entry, data, mode: modeForEntry(entry) }),
+    h(FileDiffView, {
+      key: (entry.path || "") + ":" + (entry.staged ? "s" : "w"),
+      repo,
+      entry,
+      data,
+      mode: modeForEntry(entry),
+    }),
   );
 }
 
@@ -7567,7 +7759,7 @@ function CommitBox(props) {
   const stagedCount = data.status.staged.length;
   const conflicts = data.status.conflicted.length;
   const busy = Boolean(s.busy);
-  const canCommit = !busy && !conflicts && (message.trim().length > 0 || s.commitAmend) && (stagedCount > 0 || checked.length > 0 || s.commitAmend || s.commitAllowEmpty);
+  const canCommit = !busy && !conflicts && (message.trim().length > 0 || s.commitAmend) && (checked.length > 0 || s.commitAmend || s.commitAllowEmpty);
   const subjectLen = (message.split("\n")[0] || "").trim().length;
   const optionCount = [s.commitSignOff, s.commitSkipHooks, s.commitNoGpg, s.commitAllowEmpty, s.commitPush].filter(Boolean).length;
   const setFlag = (key, value) => {
@@ -7664,7 +7856,16 @@ function CommitBox(props) {
           state.commitAmend = value;
           if (value && !message.trim()) setDraft(repo, data.headMessage || "");
           // Amend 默认只提交索引；勾选文件才会把工作区内容加入，避免误把全部更改写进旧提交。
-          setAllChecked(repo, !value);
+          if (value) {
+            // 取消 Amend 时恢复用户原本的勾选，不能无条件全选把提交范围放大。
+            data.amendCheckedSnapshot = Object.assign({}, state.checkedByRepo[repo] || {});
+            setAllChecked(repo, false);
+          } else if (data.amendCheckedSnapshot) {
+            state.checkedByRepo[repo] = data.amendCheckedSnapshot;
+            data.amendCheckedSnapshot = null;
+          } else {
+            setAllChecked(repo, true);
+          }
           notify();
         },
         title: "修改最新提交（--amend）",
@@ -7798,11 +7999,12 @@ async function loadCommitFileDiff(repo, hash, path, origPath) {
 }
 
 /** 打开提交中单个文件的差异弹窗（双击文件行或行尾按钮触发）。 */
+let diffDialogSeq = 0;
 async function openCommitFileDiffDialog(repo, hash, item, commit) {
   if (!item) return;
-  const id = (state.diffDialog && state.diffDialog.id) || 0;
   state.diffDialog = {
-    id: id + 1,
+    // 序号不随关闭归零，否则旧请求返回时会覆盖新弹窗的内容。
+    id: (diffDialogSeq += 1),
     repo,
     hash,
     path: item.path,
@@ -7847,8 +8049,16 @@ async function openCommitFromBlame(repo, commit) {
   state.activeTab = "log";
   const view = getLogView(repo);
   view.filter = defaultLogFilter();
+  // 之前可能是 --follow 的文件历史：必须清掉分页与旧列表，否则 --skip 会跳过新提交。
+  view.commits = [];
+  view.offset = 0;
+  view.hasMore = true;
+  view.error = null;
   notify();
-  void selectCommit(repo, commit);
+  void (async () => {
+    await loadLog(repo, true);
+    await selectCommit(repo, commit);
+  })();
 }
 
 /* ---------- 提交图布局 ---------- */
@@ -7910,9 +8120,10 @@ function GraphCell(props) {
   const { row, maxLanes } = props;
   const width = Math.max(16, Math.min(12, maxLanes) * 14 + 8);
   const mid = 14;
-  const x = (index) => 7 + index * 14;
-  const nodes = [];
   const limit = Math.min(12, maxLanes);
+  // lane 数超过 12 时，后续列折到最后一列，避免节点画出 viewBox。
+  const x = (index) => 7 + Math.min(index, limit - 1) * 14;
+  const nodes = [];
   for (let index = 0; index < limit; index += 1) {
     const from = row.before[index];
     const to = row.after[index];
@@ -8053,6 +8264,11 @@ function LogTab(props) {
         },
         onKeyDown: (event) => {
           if (event.key === "Enter") applyFilter();
+          else if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            clearFilter();
+          }
         },
       }),
       h("input", {
@@ -8065,6 +8281,11 @@ function LogTab(props) {
         },
         onKeyDown: (event) => {
           if (event.key === "Enter") applyFilter();
+          else if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            clearFilter();
+          }
         },
       }),
       h(IconBtn, { name: "search", label: "筛选", onClick: applyFilter }),
@@ -8243,7 +8464,7 @@ function FileTreeList(props) {
             {
               key: "d:" + node.path,
               className: "cg-row cg-tree-row",
-              style: { paddingLeft: 6 + depth * 12 + "px" },
+              style: { paddingLeft: 0.375 + depth * 0.75 + "rem" },
               title: node.path,
               onClick: () => toggleDir(node.path),
             },
@@ -8270,7 +8491,7 @@ function FileTreeList(props) {
           {
             key: "f:" + node.path,
             className: cx("cg-row cg-tree-row", activePath === node.path ? "cg-selected" : ""),
-            style: { paddingLeft: 6 + depth * 12 + "px" },
+            style: { paddingLeft: 0.375 + depth * 0.75 + "rem" },
             title: entry.origPath ? entry.origPath + " → " + node.path : node.path,
             onClick: () => onSelect(entry),
             onDoubleClick: onActivate ? () => onActivate(entry) : undefined,
@@ -8358,10 +8579,10 @@ function CommitDetail(props) {
       ),
       h(
         "div",
-        { className: "cg-actions-row", style: { borderBottom: 0, padding: "8px 0 0" } },
+        { className: "cg-actions-row", style: { borderBottom: 0, padding: "0.5rem 0 0" } },
         h(Btn, { size: "sm", icon: "branch", onClick: () => createBranchDialog(repo, selected.hash) }, "新建分支"),
-        h(Btn, { size: "sm", icon: "merge", onClick: () => cherryPickCommits(repo, [selected.hash]) }, "拣选（Cherry-pick）"),
-        h(Btn, { size: "sm", icon: "undo", onClick: () => revertCommit(repo, selected.hash) }, "还原（Revert）"),
+        h(Btn, { size: "sm", icon: "merge", disabled: Boolean(s.busy), onClick: () => cherryPickCommits(repo, [selected.hash]) }, "拣选（Cherry-pick）"),
+        h(Btn, { size: "sm", icon: "undo", disabled: Boolean(s.busy), onClick: () => revertCommit(repo, selected.hash) }, "还原（Revert）"),
         h(Btn, { size: "sm", icon: "tag", onClick: () => tagCommitDialog(repo, selected.hash) }, "标签"),
         h(Btn, { size: "sm", icon: "copy", onClick: () => copyText(selected.hash) }, "复制哈希"),
         h(IconBtn, {
@@ -8622,11 +8843,12 @@ function BlameTab(props) {
       h("span", { className: "cg-muted cg-mini" }, "行 " + blame.start + "–" + blame.end),
       h("div", { style: { flex: 1 } }),
       h(Btn, { size: "sm", icon: "arrow-left", disabled: blame.start <= 1 || blame.loading, onClick: () => shiftBlame(-MAX_BLAME_LINES) }, "上一段"),
-      h(Btn, { size: "sm", icon: "arrow-right", disabled: blame.loading, onClick: () => shiftBlame(MAX_BLAME_LINES) }, "下一段"),
+      h(Btn, { size: "sm", icon: "arrow-right", disabled: blame.loading || blame.exhausted, onClick: () => shiftBlame(MAX_BLAME_LINES) }, "下一段"),
       h(IconBtn, { name: "history", label: "文件历史", onClick: () => openFileHistory(props.repo, blame.path) }),
       h(IconBtn, { name: "refresh", label: "刷新逐行溯源", onClick: () => loadBlame(props.repo, blame.path, blame.start) }),
     ),
     blame.error ? h(Banner, { tone: "error" }, blame.error) : null,
+    blame.truncated ? h(Banner, { tone: "error" }, "逐行溯源输出达到 64KB 上限，本段可能不完整；请缩小文件或分段查看。") : null,
     blame.loading ? h("div", { className: "cg-notice" }, "正在加载逐行溯源…") : null,
     h(
       "div",
@@ -9099,8 +9321,8 @@ function TagsTab(props) {
                     openContextMenu(rect.left, rect.bottom + 2, [
                       { label: "检出标签", icon: "check", onClick: () => checkoutTag(repo, tag.name) },
                       { label: "基于标签新建分支", icon: "branch", onClick: () => createBranchDialog(repo, tag.name) },
-                      { label: "推送标签", icon: "push", onClick: () => pushTags(repo, [tag.name]) },
-                      { label: "删除远程标签", icon: "server", danger: true, onClick: () => deleteRemoteTag(repo, tag.name) },
+                      { label: "推送标签", icon: "push", disabled: !data.remotes.length, onClick: () => pushTags(repo, [tag.name]) },
+                      { label: "删除远程标签", icon: "server", danger: true, disabled: !data.remotes.length, onClick: () => deleteRemoteTag(repo, tag.name) },
                       { label: "复制标签名", icon: "copy", onClick: () => copyText(tag.name) },
                       { separator: true },
                       { label: "删除本地标签", icon: "trash", danger: true, onClick: () => deleteTag(repo, tag.name) },
@@ -9192,7 +9414,7 @@ function RemotesTab(props) {
       "div",
       { className: "cg-list-scroll" },
       data.worktrees.length
-        ? data.worktrees.map((item) =>
+        ? data.worktrees.map((item, index) =>
             h(
               "div",
               { key: item.path, className: "cg-list-row" },
@@ -9214,7 +9436,7 @@ function RemotesTab(props) {
                       onClick: () => setActiveRepo(item.path),
                     })
                   : null,
-                pathKey(item.path) !== pathKey(repo) && !item.bare
+                pathKey(item.path) !== pathKey(repo) && !item.bare && index > 0
                   ? h(IconBtn, { name: "trash", label: "删除工作树", size: 13, onClick: () => removeWorktree(repo, item.path) })
                   : null,
                 h(IconBtn, { name: "copy", label: "复制路径", size: 13, onClick: () => copyText(item.path) }),
@@ -9429,7 +9651,11 @@ function SettingsForm(props) {
         max: 20,
         value: depth,
         onChange: (event) => setDepth(event.target.value),
-        onBlur: () => save({ scanDepth: Math.max(1, Math.min(20, Number(depth) || 2)) }),
+        onBlur: () => {
+          const clamped = Math.max(1, Math.min(20, Number(depth) || 2));
+          setDepth(String(clamped));
+          save({ scanDepth: clamped });
+        },
       }),
       h("label", null, "排除目录"),
       h("textarea", {
@@ -9469,7 +9695,11 @@ function SettingsForm(props) {
         max: 300,
         value: interval,
         onChange: (event) => setIntervalValue(event.target.value),
-        onBlur: () => save({ refreshInterval: Math.max(3, Math.min(300, Number(interval) || 8)) }),
+        onBlur: () => {
+          const clamped = Math.max(3, Math.min(300, Number(interval) || 8));
+          setIntervalValue(String(clamped));
+          save({ refreshInterval: clamped });
+        },
       }),
       h("label", null, "日志每页条数"),
       h("input", {
@@ -9479,7 +9709,11 @@ function SettingsForm(props) {
         max: 200,
         value: pageSize,
         onChange: (event) => setPageSize(event.target.value),
-        onBlur: () => save({ logPageSize: Math.max(20, Math.min(200, Number(pageSize) || 100)) }),
+        onBlur: () => {
+          const clamped = Math.max(20, Math.min(200, Number(pageSize) || 100));
+          setPageSize(String(clamped));
+          save({ logPageSize: clamped });
+        },
       }),
       h("label", null, "差异上下文行数"),
       h("input", {
@@ -9489,7 +9723,11 @@ function SettingsForm(props) {
         max: 50,
         value: context,
         onChange: (event) => setContext(event.target.value),
-        onBlur: () => save({ diffContext: Math.max(0, Math.min(50, Number.isFinite(Number(context)) ? Number(context) : 3)) }),
+        onBlur: () => {
+          const clamped = Math.max(0, Math.min(50, Number.isFinite(Number(context)) ? Number(context) : 3));
+          setContext(String(clamped));
+          save({ diffContext: clamped });
+        },
       }),
     ),
     h("h3", null, "提交与同步"),

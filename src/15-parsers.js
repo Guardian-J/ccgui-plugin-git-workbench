@@ -44,7 +44,8 @@ function emptyStatus() {
 function parseStatusPorcelain(raw, stderr, version) {
   const text = String(raw || "");
   const status = emptyStatus();
-  status.truncated = text.length >= GIT_MAX_OUTPUT - 64;
+  // 字节数是宿主上限，字符数只在小输出上等价；末尾不是 NUL 说明记录被切断。
+  status.truncated = text.length >= GIT_MAX_OUTPUT - 64 || (text.length > 0 && !text.endsWith("\0"));
   const looksV1 = /^## /.test(text.replace(/^\uFEFF/, ""));
   const looksV2 = /(^|\0)# branch\.|(^|\0)[12u?] /.test(text);
   if (looksV1 && !looksV2) return parseStatusV1(text, status);
@@ -62,11 +63,13 @@ function pushStatusEntry(status, entry) {
 function parseStatusV2(text, status) {
   const tokens = text.split("\0");
   let index = 0;
+  let sawAb = false;
   while (index < tokens.length) {
     const token = tokens[index];
     index += 1;
     if (!token) continue;
     if (token[0] === "#") {
+      if (token.startsWith("# branch.ab ")) sawAb = true;
       parseStatusHeaderLine(token, status.branch);
       continue;
     }
@@ -121,6 +124,8 @@ function parseStatusV2(text, status) {
     if (token[0] === "!") continue; // ignored: 默认不展示
   }
   status.format = "v2";
+  // porcelain v2 没有 v1 的 [gone] 标记：有上游却没有 branch.ab 即上游引用已不存在。
+  if (status.branch.upstream && !sawAb) status.branch.upstreamGone = true;
   return status;
 }
 
@@ -453,7 +458,8 @@ function gitDiffHeaderPaths(header) {
 /** 解析统一 diff；返回每个文件的 hunk / 行号，供渲染与按 hunk 暂存。 */
 function parseUnifiedDiff(raw) {
   const text = String(raw || "");
-  const lines = splitLines(text);
+  // 不能走 splitLines：它会把 CRLF 归一成 LF，重建补丁时丢掉正文里的 \r。
+  const lines = text.split("\n");
   const files = [];
   let file = null;
   let hunk = null;
@@ -539,7 +545,7 @@ function parseUnifiedDiff(raw) {
       continue;
     }
     const prefix = line[0];
-    const content = line.slice(1);
+    const content = rawLine.slice(1);
     if (prefix === "+") {
       hunk.lines.push({ kind: "add", text: content, oldNo: null, newNo });
       newNo += 1;
@@ -555,7 +561,9 @@ function parseUnifiedDiff(raw) {
       oldNo += 1;
       newNo += 1;
     } else if (line === "") {
-      hunk.lines.push({ kind: "ctx", text: "", oldNo: null, newNo: null });
+      // splitLines 在末尾换行后产生的空串不是 diff 正文；真正的空行带一个空格前缀。
+      // 计入 hunk 会让 patch 头行数多 1，git apply 直接失败。
+      continue;
     } else {
       hunk.lines.push({ kind: "meta", text: line, oldNo: null, newNo: null });
     }

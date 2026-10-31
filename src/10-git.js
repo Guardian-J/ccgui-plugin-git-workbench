@@ -287,6 +287,19 @@ function decodeUtf8(bytes) {
   }
 }
 
+/**
+ * 严格解码：非法 UTF-8 字节（GBK/GB18030 等）不返回替换字符，而是标记 invalid。
+ * 以非 UTF-8 预览后再按 UTF-8 写回会永久损坏文件，因此调用方必须禁用编辑。
+ */
+function decodeUtf8Strict(bytes) {
+  if (!bytes || !bytes.length) return { text: "", invalid: false };
+  try {
+    return { text: new TextDecoder("utf-8", { fatal: true }).decode(bytes), invalid: false };
+  } catch (error) {
+    return { text: "", invalid: true };
+  }
+}
+
 function bytesHaveNul(bytes) {
   for (let i = 0; i < bytes.length; i += 1) if (bytes[i] === 0) return true;
   return false;
@@ -364,10 +377,12 @@ async function readWorkspaceFile(path, options) {
     }
   }
   const binary = bytesHaveNul(merged);
+  const decoded = binary ? { text: "", invalid: false } : decodeUtf8Strict(merged);
   return {
-    text: binary ? "" : decodeUtf8(merged),
+    text: decoded.text,
     bytes: merged,
-    binary,
+    // 非 UTF-8 文本不能安全写回，按二进制处理（UI 会禁用预览与编辑）。
+    binary: binary || decoded.invalid,
     size: merged.length,
     truncated: readFailed || truncated,
   };
@@ -404,12 +419,31 @@ async function writeWorkspaceFile(path, text, options) {
   const windows = shellIsWindows({ CCGIT_FILE: path });
   const chunks = chunkText(text, windows ? 12000 : 24000);
   if (!chunks.length) chunks.push("");
-  for (let i = 0; i < chunks.length; i += 1) {
-    const append = Boolean(opts.append) || i > 0;
+  const writeChunk = async (target, chunk, append) => {
     await runShell(windows ? powershellWriteScript(append) : posixWriteScript(append), {
-      CCGIT_FILE: toSlash(path),
-      CCGIT_CHUNK: chunks[i],
+      CCGIT_FILE: toSlash(target),
+      CCGIT_CHUNK: chunk,
     }, { description: "写入文件", timeoutMs: 30000, silent: true });
+  };
+  if (opts.append) {
+    for (const chunk of chunks) await writeChunk(path, chunk, true);
+    return true;
+  }
+  // 分块写直接作用于目标文件时，任一块失败就只剩半截内容；先写临时文件再整体替换。
+  const tmp = path + ".cg-tmp";
+  try {
+    for (let i = 0; i < chunks.length; i += 1) await writeChunk(tmp, chunks[i], i > 0);
+    const move = windows
+      ? "Move-Item -LiteralPath $env:CCGIT_TMP -Destination $env:CCGIT_FILE -Force"
+      : 'mv -f "$CCGIT_TMP" "$CCGIT_FILE"';
+    await runShell(move, { CCGIT_TMP: toSlash(tmp), CCGIT_FILE: toSlash(path) }, {
+      description: "替换文件",
+      timeoutMs: 30000,
+      silent: true,
+    });
+  } catch (error) {
+    await removeWorkspaceFile(tmp);
+    throw error;
   }
   return true;
 }
@@ -448,7 +482,8 @@ function normalizeExcludes(raw) {
   // 只拒绝控制字符（会破坏脚本与输出分隔）与超长项。
   return Array.from(new Set(
     String(raw || "")
-      .split(",")
+      // 设置页是多行文本框：逗号与换行都当作分隔符，避免整行含控制字符被丢弃。
+      .split(/[\n,]/)
       .map((item) => item.trim())
       .filter((item) =>
         item &&
@@ -538,7 +573,7 @@ async function scanGitRoots(roots, settings) {
     seenRoot.add(key);
     list.push(normalized);
   }
-  if (!list.length) return [];
+  if (!list.length) return { roots: [], truncated: false };
   const depth = Math.max(1, Math.min(20, Number(settings.scanDepth) || 2));
   const excludes = normalizeExcludes(settings.scanExclude);
   const windows = isWindows() || list.some((root) => looksWindowsPath(root));
@@ -551,8 +586,11 @@ async function scanGitRoots(roots, settings) {
   }
   const found = [];
   const seen = new Set();
+  const raw = String(res.stdout || "").replace(/^\uFEFF/, "");
+  // 每对记录都以 NUL 收尾；末尾缺 NUL 或长度触顶说明输出被宿主截断。
+  const truncated = raw.length >= GIT_MAX_OUTPUT - 64 || (raw.length > 0 && !raw.endsWith("\0"));
   // owner 与 .git 路径按 NUL 成对输出；目录名含换行/制表符也不会错位。
-  const tokens = String(res.stdout || "").replace(/^\uFEFF/, "").split("\0");
+  const tokens = raw.split("\0");
   for (let i = 0; i + 1 < tokens.length; i += 2) {
     const owner = normalizePath(tokens[i]);
     const gitPath = toSlash(tokens[i + 1]);
@@ -565,7 +603,7 @@ async function scanGitRoots(roots, settings) {
     seen.add(key);
     found.push({ owner: owner || normalizePath(root), path: normalizePath(root) });
   }
-  return found;
+  return { roots: found, truncated };
 }
 
 /** 并发探测一组路径所在的 Git 仓库根（只跑 git rev-parse，不做目录遍历）。 */
@@ -738,7 +776,11 @@ async function discoverRepos(workspacePath, settings, options) {
       ]),
     );
     try {
-      for (const item of await scanGitRoots(deepTargets.map((target) => target.path), settings)) {
+      const scan = await scanGitRoots(deepTargets.map((target) => target.path), settings);
+      if (scan.truncated) {
+        errors.push("仓库扫描输出达到 64KB 上限，部分仓库可能未列出；请减小扫描深度或增加排除目录。");
+      }
+      for (const item of scan.roots) {
         const meta = metaByRoot.get(pathKey(item.owner)) || { source: "scan", owner: item.owner };
         add(item.path, meta.source, meta.owner);
       }
@@ -771,7 +813,7 @@ async function discoverRepos(workspacePath, settings, options) {
 
 /** 快速摘要：分支/上游/变更数量，用于仓库列表与状态栏。 */
 async function loadQuickStatus(repoPath) {
-  let res = await runGit(repoPath, ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"], {
+  let res = await runGit(repoPath, ["-c", "status.aheadBehind=true", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"], {
     allowFailure: true,
     timeoutMs: 20000,
   });

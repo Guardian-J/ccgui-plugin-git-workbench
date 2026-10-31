@@ -101,12 +101,22 @@ async function pullRepo(repo, options) {
       }
       throw new GitCommandError(message, res.entry);
     }
-    return { conflict: false, message: (res.stdout || res.stderr || "").trim() };
+    const output = (res.stdout || res.stderr || "").trim();
+    // --autostash 回放冲突时 git pull 仍以 0 退出，但工作区已留下冲突与未清理的 autostash。
+    if (/resulted in conflicts/i.test(output)) {
+      return { conflict: true, autostash: true, message: output };
+    }
+    return { conflict: false, message: output };
   }, { refresh: false, errorPrefix: "拉取失败" }).then(async (result) => {
     if (!result.ok) return result;
     await refreshRepo(repo, { details: true, log: true, quick: true });
-    if (result.value && result.value.conflict) toast("拉取产生冲突，请在“本地更改”中解决", "warning");
-    else toast("拉取完成", "success");
+    if (result.value && result.value.autostash) {
+      toast("拉取完成，但自动贮藏回放冲突：请解决冲突，贮藏仍保留在 stash 中", "warning");
+    } else if (result.value && result.value.conflict) {
+      toast("拉取产生冲突，请在“本地更改”中解决", "warning");
+    } else {
+      toast("拉取完成", "success");
+    }
     return result;
   });
 }
@@ -379,11 +389,16 @@ async function rebaseBranch(repo, onto) {
       if (/CONFLICT|conflict|Resolve all conflicts/i.test(output)) return { conflict: true, output };
       throw new GitCommandError(output, res.entry);
     }
+    if (/resulted in conflicts/i.test(output)) return { conflict: true, autostash: true, output };
     return { conflict: false, output };
   }, { refresh: false, errorPrefix: "变基失败" }).then(async (result) => {
     if (!result.ok) return result;
     await refreshRepo(repo, { details: true, log: true, quick: true });
-    toast(result.value.conflict ? "变基产生冲突，请解决后继续" : "变基完成", result.value.conflict ? "warning" : "success");
+    if (result.value.autostash) {
+      toast("变基完成，但自动贮藏回放冲突：请解决冲突，贮藏仍保留在 stash 中", "warning");
+    } else {
+      toast(result.value.conflict ? "变基产生冲突，请解决后继续" : "变基完成", result.value.conflict ? "warning" : "success");
+    }
     return result;
   });
 }
@@ -622,6 +637,7 @@ async function squashLast(repo, count, message) {
   });
   if (!confirmed) return { ok: false };
   return perform(repo, "压缩提交", async () => {
+    const oldHead = await runGit(repo, ["rev-parse", "HEAD"], { allowFailure: true, timeoutMs: 10000 });
     const reset = await runGit(repo, ["reset", "--soft", "HEAD~" + n], {
       allowFailure: true,
       timeoutMs: 30000,
@@ -631,7 +647,13 @@ async function squashLast(repo, count, message) {
       allowFailure: true,
       timeoutMs: 120000,
     });
-    if (commit.code !== 0) throw new GitCommandError((commit.stderr || commit.stdout || "").trim(), commit.entry);
+    if (commit.code !== 0) {
+      // 提交失败（钩子拒绝等）时把分支指针放回原处，避免历史被静默回退。
+      if (oldHead.code === 0 && oldHead.stdout.trim()) {
+        await runGit(repo, ["reset", "--soft", oldHead.stdout.trim()], { allowFailure: true, timeoutMs: 30000 });
+      }
+      throw new GitCommandError((commit.stderr || commit.stdout || "").trim(), commit.entry);
+    }
   }, { success: "已压缩 " + n + " 个提交", details: true, log: true, quick: true });
 }
 
@@ -735,6 +757,10 @@ async function skipOperation(repo) {
 }
 
 async function resolveConflict(repo, path, side) {
+  if (side !== "ours" && side !== "theirs") {
+    toast("未知的冲突解决方式", "error");
+    return { ok: false };
+  }
   return perform(repo, "解决冲突", async () => {
     const res = await runGit(repo, ["checkout", "--" + side, "--", path], {
       allowFailure: true,
@@ -792,6 +818,16 @@ async function stashDialog(repo) {
 }
 
 async function stashApply(repo, selector, action) {
+  if (action !== "apply" && action !== "pop" && action !== "drop") {
+    toast("未知的贮藏操作", "error");
+    return { ok: false };
+  }
+  // stash@{n} 会随删除/新建整体位移：操作前用 hash 确认仍是列表里的同一条。
+  const expected = ensureRepoData(repo).stashes.find((item) => item.selector === selector);
+  if (!expected) {
+    toast("贮藏列表已变化，请刷新后重试", "warning");
+    return { ok: false };
+  }
   if (action === "drop") {
     const confirmed = await confirmDestructive({
       title: "删除贮藏",
@@ -802,6 +838,10 @@ async function stashApply(repo, selector, action) {
     if (!confirmed) return { ok: false };
   }
   return perform(repo, action === "pop" ? "应用并删除贮藏" : action === "drop" ? "删除贮藏" : "应用贮藏", async () => {
+    const current = await runGit(repo, ["rev-parse", "--verify", selector], { allowFailure: true, timeoutMs: 10000 });
+    if (current.code !== 0 || current.stdout.trim() !== expected.hash) {
+      throw new Error("贮藏列表已变化，请刷新后重试");
+    }
     const res = await runGit(repo, ["stash", action, selector], {
       allowFailure: true,
       timeoutMs: 120000,
@@ -822,7 +862,11 @@ async function stashApply(repo, selector, action) {
 
 async function stashBranch(repo, selector) {
   const stash = ensureRepoData(repo).stashes.find((item) => item.selector === selector);
-  const suffix = stash ? shortHash(stash.hash) : "new";
+  if (!stash) {
+    toast("贮藏列表已变化，请刷新后重试", "warning");
+    return { ok: false };
+  }
+  const suffix = shortHash(stash.hash);
   const values = await promptDialog({
     title: "从贮藏创建分支",
     fields: [{ key: "name", label: "新分支名", value: "stash/" + suffix }],
@@ -835,6 +879,10 @@ async function stashBranch(repo, selector) {
     return { ok: false };
   }
   return perform(repo, "从贮藏创建分支", async () => {
+    const current = await runGit(repo, ["rev-parse", "--verify", selector], { allowFailure: true, timeoutMs: 10000 });
+    if (current.code !== 0 || current.stdout.trim() !== stash.hash) {
+      throw new Error("贮藏列表已变化，请刷新后重试");
+    }
     const res = await runGit(repo, ["stash", "branch", String(values.name).trim(), selector], {
       allowFailure: true,
       timeoutMs: 120000,
@@ -1237,7 +1285,9 @@ async function setConfigDialog(repo) {
 /* ---------- 控制台 ---------- */
 
 async function runConsoleCommand(repo, input) {
-  const args = splitCommandLine(input);
+  const parsed = splitCommandLine(input);
+  // 用户常直接粘贴 `git status`：去掉可选的 git 前缀，避免拼成 `git ... git status`。
+  const args = parsed.length && parsed[0].toLowerCase() === "git" ? parsed.slice(1) : parsed;
   if (!args.length) return { ok: false };
   return perform(repo, "执行 git " + args[0], async () => {
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: NETWORK_TIMEOUT_MS });

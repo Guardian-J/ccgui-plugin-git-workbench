@@ -6,6 +6,7 @@
 const state = {
   rev: 0,
   ready: false,
+  settingsLoadFailed: false,
   settings: Object.assign({}, DEFAULT_SETTINGS),
   workspacePath: "",
   workspaceName: "",
@@ -159,6 +160,8 @@ async function loadSettings() {
     saved = await appCtx.storage.get("settings");
   } catch (error) {
     saved = null;
+    // 读不到旧设置时默认值不可信，后续保存会把默认值写回去覆盖用户配置。
+    state.settingsLoadFailed = true;
   }
   if (saved && typeof saved === "object" && !Array.isArray(saved)) {
     state.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
@@ -197,6 +200,10 @@ async function loadSettings() {
 }
 
 async function saveSettings(patch) {
+  if (state.settingsLoadFailed) {
+    toast("设置读取失败，已阻止覆盖；请重启插件后重试。", "error");
+    return;
+  }
   state.settings = Object.assign({}, state.settings, patch || {});
   if (patch && Object.prototype.hasOwnProperty.call(patch, "signOff")) state.commitSignOff = Boolean(patch.signOff);
   if (patch && Object.prototype.hasOwnProperty.call(patch, "skipHooks")) state.commitSkipHooks = Boolean(patch.skipHooks);
@@ -595,8 +602,7 @@ async function loadQuickStatusFor(path) {
     data.quick = quick;
     data.quickAt = Date.now();
     if (quick.error) data.error = quick.error;
-    if (state.activeRepo === key) notify();
-    else notify();
+    notify();
   } catch (error) {
     data.quick = { error: safeError(error) };
     data.quickAt = Date.now();
@@ -628,7 +634,7 @@ async function loadRepoStatus(path, force) {
     try {
       const res = await runGit(
         key,
-        ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"],
+        ["-c", "status.aheadBehind=true", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"],
         { allowFailure: true, timeoutMs: 30000 },
       );
       let parsed;
@@ -731,14 +737,16 @@ function computeStatusSignature(status) {
 }
 
 /**
- * 按行记录的输出若触达 64KB 上限，最后一行可能被截断：丢弃最后一个换行之后的残片。
- * 返回 {text, truncated}。
+ * git log 用 %x1e 分隔记录；输出触达 64KB 上限时最后一条可能被切断。
+ * 返回 {text, truncated}，text 只保留完整的记录。
  */
 function clipTruncatedLines(stdout) {
   const text = String(stdout || "");
-  if (text.length < GIT_MAX_OUTPUT - 64) return { text, truncated: false };
-  const cut = text.lastIndexOf("\n");
-  return { text: cut >= 0 ? text.slice(0, cut) : "", truncated: true };
+  const nearLimit = text.length >= GIT_MAX_OUTPUT - 64;
+  const complete = !text.length || text.endsWith("\x1e");
+  if (!nearLimit && complete) return { text, truncated: false };
+  const cut = text.lastIndexOf("\x1e");
+  return { text: cut >= 0 ? text.slice(0, cut + 1) : "", truncated: true };
 }
 
 function syncCheckedFiles(repo, status) {
@@ -766,6 +774,7 @@ async function loadOperations(repo) {
   const data = ensureRepoData(repo);
   const gitDir = data.gitDir || (await resolveGitDir(repo));
   const operations = { merge: false, cherryPick: false, revert: false, bisect: false, rebase: false };
+  let operationsError = null;
   if (gitDir) {
     // 一次 shell 检查全部状态文件，避免轮询时反复启动 4 个 git 进程。
     const script = shellIsWindows({ CCGIT_GITDIR: gitDir })
@@ -784,12 +793,16 @@ async function loadOperations(repo) {
         operations.revert = parts[2] === "1";
         operations.bisect = parts[3] === "1";
         operations.rebase = parts[4] === "1";
+      } else {
+        operationsError = "无法识别进行中的 Git 操作检测结果";
       }
     } catch (error) {
-      // 检测失败时保持全部 false；后续操作会由 git 自身报错。
+      // 检测失败时保持全部 false；后续操作会由 git 自身报错，但界面要提示检测不可用。
+      operationsError = safeError(error);
     }
   }
   data.operations = operations;
+  data.operationsError = operationsError;
   notify();
 }
 
@@ -947,7 +960,8 @@ async function loadLog(path, reset, options) {
         notify();
         return;
       }
-      const commits = parseLog(res.stdout);
+      const clipped = clipTruncatedLines(res.stdout);
+      const commits = parseLog(clipped.text);
       if (reset) {
         view.commits = commits;
       } else {
@@ -959,10 +973,10 @@ async function loadLog(path, reset, options) {
         ensureRepoData(key).selectedCommit = null;
       }
       view.offset += commits.length;
-      view.hasMore = commits.length >= pageSize;
+      view.hasMore = commits.length >= pageSize || clipped.truncated;
       view.loading = false;
       view.error = null;
-      view.truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64;
+      view.truncated = clipped.truncated;
       notify();
     } catch (error) {
       view.loading = false;

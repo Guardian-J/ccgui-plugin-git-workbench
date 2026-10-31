@@ -213,19 +213,23 @@ async function discardPaths(repo, entries) {
   const list = entries && entries.length ? entries : [];
   if (!list.length) return { ok: true };
   const names = list.map((entry) => entry.path);
+  const untrackedOnly = list.every((entry) => entry.code === "?" && !entry.staged);
   const confirmed = await confirmDestructive({
-    title: "回滚更改",
-    message: "将丢弃 " + names.length + " 个文件的本地更改，且不可恢复。",
+    title: untrackedOnly ? "删除未跟踪文件" : "回滚更改",
+    message: untrackedOnly
+      ? "将永久删除 " + names.length + " 个未跟踪文件，且无法从 Git 恢复。"
+      : "将丢弃 " + names.length + " 个文件的本地更改，且不可恢复。",
     detail: names.slice(0, 12).join("\n") + (names.length > 12 ? "\n…" : ""),
-    confirmLabel: "回滚",
+    confirmLabel: untrackedOnly ? "删除" : "回滚",
     danger: true,
   });
   if (!confirmed) return { ok: false, canceled: true };
-  return perform(repo, "回滚更改", async () => {
+  return perform(repo, untrackedOnly ? "删除未跟踪文件" : "回滚更改", async () => {
     const untracked = [];
     const added = [];
     const restoreFromIndex = [];
     const restoreFromHead = [];
+    const resetStagedOnly = [];
     const handled = new Set();
     const fullStatus = ensureRepoData(repo).status;
     const allEntries = fullStatus.staged.concat(
@@ -283,10 +287,14 @@ async function discardPaths(repo, entries) {
         continue;
       }
       if (entry.code === "?" || (entry.staged && entry.x === "A")) {
-        if (entry.staged) added.push(entry.path);
+        const hasUnstagedSamePath = fullStatus.unstaged.some((item) => item.path === entry.path);
+        if (entry.staged && hasUnstagedSamePath) resetStagedOnly.push(entry.path);
+        else if (entry.staged) added.push(entry.path);
         else untracked.push(entry.path);
       } else if (entry.staged) {
-        restoreFromHead.push(entry.path);
+        // `checkout HEAD --` 会同时覆盖工作区；同文件还有未暂存改动时必须只重置索引。
+        if (fullStatus.unstaged.some((item) => item.path === entry.path)) resetStagedOnly.push(entry.path);
+        else restoreFromHead.push(entry.path);
       } else {
         // 未暂存改动只回滚到索引版本；若同一文件还有已暂存内容，不能连带清掉。
         restoreFromIndex.push(entry.path);
@@ -307,6 +315,13 @@ async function discardPaths(repo, entries) {
       });
       if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
     }
+    if (resetStagedOnly.length) {
+      let reset = await runGit(repo, ["reset", "-q", "HEAD", "--"].concat(resetStagedOnly), { allowFailure: true });
+      if (reset.code !== 0 && !(await hasHeadCommit(repo))) {
+        reset = await runGit(repo, ["rm", "-r", "--cached", "--quiet", "--"].concat(resetStagedOnly), { allowFailure: true });
+      }
+      if (reset.code !== 0) throw new GitCommandError((reset.stderr || reset.stdout || "").trim(), reset.entry);
+    }
     if (restoreFromHead.length) {
       const hasHead = await hasHeadCommit(repo);
       const args = hasHead ? ["checkout", "HEAD", "--"] : ["checkout", "--"];
@@ -322,7 +337,7 @@ async function discardPaths(repo, entries) {
       if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
     }
     return { count: list.length };
-  }, { success: "已回滚 " + names.length + " 个文件", details: false });
+  }, { success: untrackedOnly ? "已删除 " + names.length + " 个未跟踪文件" : "已回滚 " + names.length + " 个文件", details: false });
 }
 
 async function hasHeadCommit(repo) {
@@ -438,6 +453,11 @@ async function commitChanges(repo, options) {
     return { ok: false };
   }
   const selected = selectedRaw;
+  // 勾选是提交范围的唯一依据：空勾选时不能悄悄退化成「提交全部已暂存」。
+  if (!selected.length && !opts.amend && !opts.allowEmpty) {
+    toast("请先勾选要提交的文件", "error");
+    return { ok: false };
+  }
   // 提交路径：已暂存的重命名需要同时带上旧路径，--only 才能把删除一并写入提交。
   const paths = expandRenamePaths(
     repo,
@@ -592,7 +612,7 @@ async function ensureFileDiff(repo, entry, mode, force) {
         throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
       }
       result.text = res.stdout;
-      result.truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64;
+      result.truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64 || (res.stdout.length > 0 && !res.stdout.endsWith("\n"));
       result.files = parseUnifiedDiff(res.stdout);
     }
     result.loading = false;
@@ -768,6 +788,26 @@ async function exportPatch(repo, scope) {
   }, { refresh: false, success: "补丁已导出" });
 }
 
+/**
+ * `git apply --3way` 会隐式写索引。对比应用前后的暂存差异，只 reset 新出现的路径，
+ * 返回未能恢复的路径（空数组表示成功或无需恢复）。
+ */
+async function restoreIndexAfterThreeWay(repo, stagedBefore) {
+  const afterRes = await runGit(repo, ["diff", "--cached", "--name-only", "-z"], {
+    allowFailure: true,
+    timeoutMs: 30000,
+  });
+  if (afterRes.code !== 0) return [];
+  const stagedAfter = new Set(String(afterRes.stdout || "").split("\u0000").filter(Boolean));
+  const newlyStaged = Array.from(stagedAfter).filter((path) => !stagedBefore.has(path));
+  if (!newlyStaged.length) return [];
+  const reset = await runGit(repo, ["reset", "-q", "HEAD", "--"].concat(newlyStaged), {
+    allowFailure: true,
+    timeoutMs: 30000,
+  });
+  return reset.code === 0 ? [] : newlyStaged;
+}
+
 async function applyPatch(repo) {
   const target = await promptDialog({
     title: "应用补丁",
@@ -821,22 +861,19 @@ async function applyPatch(repo) {
     if (target.threeWay) args.push("--3way");
     args.push("--", patchPath);
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: 120000 });
-    if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
+    if (res.code !== 0) {
+      // --3way 失败也可能已写入索引（冲突条目）：先恢复应用前的暂存状态，再报原始错误。
+      if (target.threeWay) {
+        const failed = await restoreIndexAfterThreeWay(repo, stagedBefore);
+        if (failed.length) toast("补丁应用失败，且索引未完全恢复：" + failed.slice(0, 5).join(", "), "warning");
+      }
+      throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
+    }
     if (target.threeWay) {
       // --3way 隐式使用 --index；用应用前后的暂存差异精确找出新写入的路径，避免误动原有暂存。
-      const afterRes = await runGit(repo, ["diff", "--cached", "--name-only", "-z"], {
-        allowFailure: true,
-        timeoutMs: 30000,
-      });
-      const stagedAfter = new Set(String(afterRes.stdout || "").split("\u0000").filter(Boolean));
-      const newlyStaged = Array.from(stagedAfter).filter((path) => !stagedBefore.has(path));
-      if (!newlyStaged.length) return;
-      const reset = await runGit(repo, ["reset", "-q", "HEAD", "--"].concat(newlyStaged), {
-        allowFailure: true,
-        timeoutMs: 30000,
-      });
-      if (reset.code !== 0) {
-        throw new GitCommandError("补丁已应用，但取消暂存失败：" + (reset.stderr || "").trim(), reset.entry);
+      const failed = await restoreIndexAfterThreeWay(repo, stagedBefore);
+      if (failed.length) {
+        throw new GitCommandError("补丁已应用，但取消暂存失败：" + failed.slice(0, 5).join(", "), null);
       }
     }
   }, { success: "补丁已应用", details: true });
@@ -991,8 +1028,18 @@ async function loadBlame(repo, path, start) {
       throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
     }
     const lines = parseBlamePorcelain(res.stdout);
+    const truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64 || (res.stdout.length > 0 && !res.stdout.endsWith("\n"));
+    let maxLine = 0;
+    for (let i = 0; i < lines.length; i += 1) if (lines[i]) maxLine = i;
     if (!state.blame || state.blame.token !== token) return;
-    state.blame = Object.assign({}, state.blame, { lines, loading: false, error: null });
+    state.blame = Object.assign({}, state.blame, {
+      lines,
+      truncated,
+      // 本段没填满，说明已经到文件末尾，禁用“下一段”。
+      exhausted: maxLine < rangeEnd,
+      loading: false,
+      error: null,
+    });
     notify();
   } catch (error) {
     const message = safeError(error);

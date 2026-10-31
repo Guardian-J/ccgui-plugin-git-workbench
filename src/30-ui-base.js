@@ -45,7 +45,7 @@ const PLUGIN_CSS = `
 [data-plugin-overlay-host].cg-overlay-raised{z-index:100}
 .cg-workbench-modal>.cg-root{flex:1;width:100%;min-width:0}
 .cg-workbench-close{flex:none}
-.cg-header{display:flex;align-items:center;gap:0.625rem;padding:0.5rem 0.75rem 0.5rem 0.875rem;border-bottom:1px solid var(--cg-border);flex:none;min-height:3.25rem;background:var(--cg-surface)}
+.cg-header{display:flex;align-items:center;gap:0.625rem;padding:0.5rem 0.75rem 0.5rem 0.875rem;border-bottom:1px solid var(--cg-border);flex:none;flex-wrap:wrap;min-height:3.25rem;background:var(--cg-surface)}
 .cg-header-title{display:flex;align-items:center;gap:0.5rem;font-size:0.8125rem;font-weight:600;min-width:0}
 .cg-header-title>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cg-brand{display:inline-flex;align-items:center;justify-content:center;width:1.75rem;height:1.75rem;flex:none;border-radius:0.5rem;background:var(--cg-accent-soft);color:var(--cg-accent-text)}
@@ -255,7 +255,7 @@ const PLUGIN_CSS = `
 
 /* ---------- 提交图 ---------- */
 .cg-log{flex:1;min-height:0;display:flex;background:var(--cg-surface)}
-.cg-log-list{flex:0 1 56%;width:auto;min-width:min(18.75rem,45%);max-width:70%;border-right:1px solid var(--cg-border);display:flex;flex-direction:column;min-height:0}
+.cg-log-list{flex:0 1 56%;width:auto;min-width:min(18.75rem,45%);max-width:70%;border-right:1px solid var(--cg-border);display:flex;flex-direction:column;min-height:0;container-type:inline-size}
 .cg-log-scroll{flex:1;overflow:auto;min-height:0;padding:2px 0}
 .cg-commit-row{display:flex;align-items:center;gap:0.625rem;height:1.875rem;padding:0 0.75rem 0 0.5rem;cursor:pointer;min-width:0;transition:background 100ms ease}
 .cg-commit-row:hover{background:var(--cg-hover)}
@@ -396,7 +396,7 @@ const PLUGIN_CSS = `
 
 /* ---------- 杂项 ---------- */
 .cg-kbd{font-family:var(--font-mono);font-size:0.625rem;border:1px solid var(--cg-border);border-radius:0.3125rem;padding:1px 0.3125rem;color:var(--color-text-tertiary);background:var(--cg-surface-2)}
-.cg-file-dot{width:0.4375rem;height:0.4375rem;border-radius:99px;flex:none}
+.cg-file-dot{width:0.4375rem;height:0.4375rem;border-radius:999px;flex:none}
 .cg-hr{border:0;border-top:1px solid var(--cg-border);margin:0}
 .cg-wrap{white-space:pre-wrap;word-break:break-word}
 .cg-hidden{display:none!important}
@@ -630,9 +630,11 @@ function TabBar(props) {
   );
 }
 
-/** 工作台与其菜单、确认框共用覆盖层，内层浮层始终显示在全屏工作台上方。 */
+/** 工作台与其菜单、确认框、差异弹窗共用覆盖层，内层浮层始终显示在全屏工作台上方。 */
 function workbenchFocusScope(root) {
-  return (state.dialog && root.querySelector(".cg-dialog")) || root;
+  if (state.diffDialog) return root.querySelector(".cg-diff-modal") || root;
+  if (state.dialog) return root.querySelector(".cg-dialog") || root;
+  return root;
 }
 
 function workbenchFocusables(root) {
@@ -670,7 +672,7 @@ function OverlayHost() {
       document.body.style.overflow = previousOverflow;
       if (previousFocus && previousFocus.isConnected && typeof previousFocus.focus === "function") previousFocus.focus();
     };
-  }, [s.workbenchOpen]);
+  }, [s.workbenchOpen, Boolean(s.diffDialog)]);
   // :has() 需要 Chromium 105+；旧 WebView 上改为直接标记宿主覆盖层容器。
   useEffect(() => {
     if (!s.workbenchOpen && !s.dialog) return;
@@ -893,7 +895,7 @@ function ToastHost() {
   if (!s.toasts.length) return null;
   return h(
     "div",
-    { className: "cg-toasts" },
+    { className: "cg-toasts", role: "status", "aria-live": "polite" },
     s.toasts.map((item) =>
       h(
         "div",

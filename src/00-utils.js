@@ -5,7 +5,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.6";
+const PLUGIN_VERSION = "0.2.7";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -279,6 +279,14 @@ function splitCommandLine(input) {
       continue;
     }
     if (ch === "\\" && quote !== "'") {
+      const next = s[i + 1];
+      // Windows 路径里的反斜杠不是转义符：只有后跟空白、引号或另一个反斜杠时才转义，
+      // 这样 `src\main.js` 不会被吞成 `srcmain.js`，同时保留 `a\ b` 这类 POSIX 写法。
+      if (next !== undefined && !/[\s"'\\]/.test(next)) {
+        cur += ch;
+        has = true;
+        continue;
+      }
       escaped = true;
       continue;
     }

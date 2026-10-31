@@ -104,11 +104,12 @@ async function loadCommitFileDiff(repo, hash, path, origPath) {
 }
 
 /** 打开提交中单个文件的差异弹窗（双击文件行或行尾按钮触发）。 */
+let diffDialogSeq = 0;
 async function openCommitFileDiffDialog(repo, hash, item, commit) {
   if (!item) return;
-  const id = (state.diffDialog && state.diffDialog.id) || 0;
   state.diffDialog = {
-    id: id + 1,
+    // 序号不随关闭归零，否则旧请求返回时会覆盖新弹窗的内容。
+    id: (diffDialogSeq += 1),
     repo,
     hash,
     path: item.path,
@@ -153,8 +154,16 @@ async function openCommitFromBlame(repo, commit) {
   state.activeTab = "log";
   const view = getLogView(repo);
   view.filter = defaultLogFilter();
+  // 之前可能是 --follow 的文件历史：必须清掉分页与旧列表，否则 --skip 会跳过新提交。
+  view.commits = [];
+  view.offset = 0;
+  view.hasMore = true;
+  view.error = null;
   notify();
-  void selectCommit(repo, commit);
+  void (async () => {
+    await loadLog(repo, true);
+    await selectCommit(repo, commit);
+  })();
 }
 
 /* ---------- 提交图布局 ---------- */
@@ -216,9 +225,10 @@ function GraphCell(props) {
   const { row, maxLanes } = props;
   const width = Math.max(16, Math.min(12, maxLanes) * 14 + 8);
   const mid = 14;
-  const x = (index) => 7 + index * 14;
-  const nodes = [];
   const limit = Math.min(12, maxLanes);
+  // lane 数超过 12 时，后续列折到最后一列，避免节点画出 viewBox。
+  const x = (index) => 7 + Math.min(index, limit - 1) * 14;
+  const nodes = [];
   for (let index = 0; index < limit; index += 1) {
     const from = row.before[index];
     const to = row.after[index];
@@ -359,6 +369,11 @@ function LogTab(props) {
         },
         onKeyDown: (event) => {
           if (event.key === "Enter") applyFilter();
+          else if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            clearFilter();
+          }
         },
       }),
       h("input", {
@@ -371,6 +386,11 @@ function LogTab(props) {
         },
         onKeyDown: (event) => {
           if (event.key === "Enter") applyFilter();
+          else if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            clearFilter();
+          }
         },
       }),
       h(IconBtn, { name: "search", label: "筛选", onClick: applyFilter }),
@@ -549,7 +569,7 @@ function FileTreeList(props) {
             {
               key: "d:" + node.path,
               className: "cg-row cg-tree-row",
-              style: { paddingLeft: 6 + depth * 12 + "px" },
+              style: { paddingLeft: 0.375 + depth * 0.75 + "rem" },
               title: node.path,
               onClick: () => toggleDir(node.path),
             },
@@ -576,7 +596,7 @@ function FileTreeList(props) {
           {
             key: "f:" + node.path,
             className: cx("cg-row cg-tree-row", activePath === node.path ? "cg-selected" : ""),
-            style: { paddingLeft: 6 + depth * 12 + "px" },
+            style: { paddingLeft: 0.375 + depth * 0.75 + "rem" },
             title: entry.origPath ? entry.origPath + " → " + node.path : node.path,
             onClick: () => onSelect(entry),
             onDoubleClick: onActivate ? () => onActivate(entry) : undefined,
@@ -664,10 +684,10 @@ function CommitDetail(props) {
       ),
       h(
         "div",
-        { className: "cg-actions-row", style: { borderBottom: 0, padding: "8px 0 0" } },
+        { className: "cg-actions-row", style: { borderBottom: 0, padding: "0.5rem 0 0" } },
         h(Btn, { size: "sm", icon: "branch", onClick: () => createBranchDialog(repo, selected.hash) }, "新建分支"),
-        h(Btn, { size: "sm", icon: "merge", onClick: () => cherryPickCommits(repo, [selected.hash]) }, "拣选（Cherry-pick）"),
-        h(Btn, { size: "sm", icon: "undo", onClick: () => revertCommit(repo, selected.hash) }, "还原（Revert）"),
+        h(Btn, { size: "sm", icon: "merge", disabled: Boolean(s.busy), onClick: () => cherryPickCommits(repo, [selected.hash]) }, "拣选（Cherry-pick）"),
+        h(Btn, { size: "sm", icon: "undo", disabled: Boolean(s.busy), onClick: () => revertCommit(repo, selected.hash) }, "还原（Revert）"),
         h(Btn, { size: "sm", icon: "tag", onClick: () => tagCommitDialog(repo, selected.hash) }, "标签"),
         h(Btn, { size: "sm", icon: "copy", onClick: () => copyText(selected.hash) }, "复制哈希"),
         h(IconBtn, {
@@ -928,11 +948,12 @@ function BlameTab(props) {
       h("span", { className: "cg-muted cg-mini" }, "行 " + blame.start + "–" + blame.end),
       h("div", { style: { flex: 1 } }),
       h(Btn, { size: "sm", icon: "arrow-left", disabled: blame.start <= 1 || blame.loading, onClick: () => shiftBlame(-MAX_BLAME_LINES) }, "上一段"),
-      h(Btn, { size: "sm", icon: "arrow-right", disabled: blame.loading, onClick: () => shiftBlame(MAX_BLAME_LINES) }, "下一段"),
+      h(Btn, { size: "sm", icon: "arrow-right", disabled: blame.loading || blame.exhausted, onClick: () => shiftBlame(MAX_BLAME_LINES) }, "下一段"),
       h(IconBtn, { name: "history", label: "文件历史", onClick: () => openFileHistory(props.repo, blame.path) }),
       h(IconBtn, { name: "refresh", label: "刷新逐行溯源", onClick: () => loadBlame(props.repo, blame.path, blame.start) }),
     ),
     blame.error ? h(Banner, { tone: "error" }, blame.error) : null,
+    blame.truncated ? h(Banner, { tone: "error" }, "逐行溯源输出达到 64KB 上限，本段可能不完整；请缩小文件或分段查看。") : null,
     blame.loading ? h("div", { className: "cg-notice" }, "正在加载逐行溯源…") : null,
     h(
       "div",

@@ -201,6 +201,9 @@ function FileFilterBar(props) {
 function OperationBanner(props) {
   const h = appCtx.react.createElement;
   const ops = props.data.operations;
+  if (props.data.operationsError) {
+    return h(Banner, { tone: "error" }, "无法检测进行中的 Git 操作：" + props.data.operationsError);
+  }
   if (!ops.merge && !ops.rebase && !ops.cherryPick && !ops.revert) return null;
   const label = ops.rebase ? "变基" : ops.merge ? "合并" : ops.cherryPick ? "拣选（Cherry-pick）" : "还原（Revert）";
   return h(
@@ -260,7 +263,15 @@ function ChangesToolbar(props) {
           "div",
           { className: "cg-tgroup" },
           hasUnstaged ? h(Btn, { size: "sm", icon: "plus", onClick: () => stageAll(repo) }, "全部暂存") : null,
-          hasStaged ? h(Btn, { size: "sm", icon: "minus", onClick: () => unstageAll(repo) }, "全部取消") : null,
+          hasStaged
+            ? h(Btn, {
+                size: "sm",
+                icon: "minus",
+                disabled: data.status.conflicted.length > 0,
+                title: data.status.conflicted.length ? "存在未解决冲突，无法全部取消暂存" : "",
+                onClick: () => unstageAll(repo),
+              }, "全部取消")
+            : null,
         )
       : null,
     h("div", { className: "cg-header-sep" }),
@@ -346,7 +357,7 @@ function FileTree(props) {
           {
             key: "d:" + groupKey + ":" + node.path,
             className: "cg-row cg-tree-row",
-            style: { paddingLeft: 6 + depth * 12 + "px" },
+            style: { paddingLeft: 0.375 + depth * 0.75 + "rem" },
             title: node.path,
             onClick: () => toggleDir(repo, node.path),
           },
@@ -394,7 +405,7 @@ function FileRow(props) {
     { label: "复制路径", icon: "copy", onClick: () => copyText(entry.path) },
     { label: "添加到 .gitignore", icon: "file", onClick: () => addToGitignore(repo, [entry.path]) },
   ];
-  if (entry.code !== "?" && !entry.unmerged) {
+  if (entry.code !== "?" && !entry.unmerged && !(entry.staged && entry.x === "D")) {
     menuItems.push(
       { separator: true },
       { label: "标记为未更改", icon: "eye", onClick: () => setAssumeUnchanged(repo, [entry.path], true) },
@@ -421,7 +432,7 @@ function FileRow(props) {
     "div",
     {
       className: cx("cg-row cg-tree-row", selected ? "cg-selected" : ""),
-      style: { paddingLeft: 6 + (depth + 1) * 12 + "px" },
+      style: { paddingLeft: 0.375 + (depth + 1) * 0.75 + "rem" },
       onClick: open,
       onContextMenu: (event) => {
         event.preventDefault();
@@ -521,9 +532,13 @@ function ContextMenuHost() {
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onDown, true);
+    window.addEventListener("blur", onDown);
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onDown, true);
+      window.removeEventListener("blur", onDown);
     };
   }, [contextMenuState]);
   if (!contextMenuState) return null;
@@ -595,7 +610,13 @@ function DiffPane(props) {
   return h(
     "div",
     { className: "cg-diffcol" },
-    h(FileDiffView, { repo, entry, data, mode: modeForEntry(entry) }),
+    h(FileDiffView, {
+      key: (entry.path || "") + ":" + (entry.staged ? "s" : "w"),
+      repo,
+      entry,
+      data,
+      mode: modeForEntry(entry),
+    }),
   );
 }
 
@@ -984,7 +1005,7 @@ function CommitBox(props) {
   const stagedCount = data.status.staged.length;
   const conflicts = data.status.conflicted.length;
   const busy = Boolean(s.busy);
-  const canCommit = !busy && !conflicts && (message.trim().length > 0 || s.commitAmend) && (stagedCount > 0 || checked.length > 0 || s.commitAmend || s.commitAllowEmpty);
+  const canCommit = !busy && !conflicts && (message.trim().length > 0 || s.commitAmend) && (checked.length > 0 || s.commitAmend || s.commitAllowEmpty);
   const subjectLen = (message.split("\n")[0] || "").trim().length;
   const optionCount = [s.commitSignOff, s.commitSkipHooks, s.commitNoGpg, s.commitAllowEmpty, s.commitPush].filter(Boolean).length;
   const setFlag = (key, value) => {
@@ -1081,7 +1102,16 @@ function CommitBox(props) {
           state.commitAmend = value;
           if (value && !message.trim()) setDraft(repo, data.headMessage || "");
           // Amend 默认只提交索引；勾选文件才会把工作区内容加入，避免误把全部更改写进旧提交。
-          setAllChecked(repo, !value);
+          if (value) {
+            // 取消 Amend 时恢复用户原本的勾选，不能无条件全选把提交范围放大。
+            data.amendCheckedSnapshot = Object.assign({}, state.checkedByRepo[repo] || {});
+            setAllChecked(repo, false);
+          } else if (data.amendCheckedSnapshot) {
+            state.checkedByRepo[repo] = data.amendCheckedSnapshot;
+            data.amendCheckedSnapshot = null;
+          } else {
+            setAllChecked(repo, true);
+          }
           notify();
         },
         title: "修改最新提交（--amend）",

@@ -301,7 +301,7 @@ function WorkbenchTabs() {
   const tabs = [
     { key: "changes", label: "本地更改", icon: "edit", count: dirty || null },
     { key: "log", label: "提交图", icon: "commit" },
-    { key: "branches", label: "分支", icon: "branch", count: data.branches.length || null },
+    { key: "branches", label: "分支", icon: "branch", count: (data.branches.locals.length + data.branches.remotes.length) || null },
     showStashes ? { key: "stashes", label: "贮藏", title: "贮藏（Stash）", sub: true, count: data.stashes.length || null } : null,
     { key: "tags", label: "标签", sub: true, count: data.tags.length || null },
     { key: "remotes", label: "远程", sub: true, count: data.remotes.length || null },
