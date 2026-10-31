@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.10";
+const PLUGIN_VERSION = "0.2.11";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -5988,15 +5988,14 @@ const PLUGIN_CSS = `
 .cg-ref.cg-branch{background:var(--color-status-cyan-background);color:var(--color-status-cyan-text)}
 .cg-ref.cg-tag{background:var(--color-status-yellow-background);color:var(--color-status-yellow-text)}
 .cg-ref.cg-remote{background:var(--color-background-tertiary-default);color:var(--color-text-secondary)}
-.cg-detail-head{padding:0.75rem 1rem;border-bottom:1px solid var(--cg-border);flex:0 1 auto;min-height:0;max-height:40%;overflow:auto}
+.cg-detail-head{padding:0.75rem 1rem;border-bottom:1px solid var(--cg-border);flex:none}
 .cg-detail-subject{font-size:0.875rem;font-weight:600;margin-bottom:0.5rem;word-break:break-word}
 .cg-detail-meta{display:grid;grid-template-columns:minmax(4rem,max-content) minmax(0,1fr);gap:0.25rem 0.625rem;color:var(--color-text-secondary);font-size:0.75rem}
 .cg-detail-meta dt{color:var(--color-text-tertiary)}
 .cg-detail-meta dd{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cg-detail-body{white-space:pre-wrap;font-family:var(--font-mono);font-size:0.7188rem;padding:0.625rem 1rem;border-bottom:1px solid var(--cg-border);max-height:11.25rem;overflow:auto;background:var(--cg-surface-2);color:var(--color-text-secondary)}
-.cg-detail-files{flex:0 1 auto;min-height:3.5rem;max-height:32%;overflow:auto;border-bottom:1px solid var(--cg-border);padding:2px 0}
-.cg-detail-diff{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;background:var(--cg-surface)}
-.cg-log-detail{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.cg-detail-files{flex:none;border-bottom:1px solid var(--cg-border);padding:2px 0}
+.cg-log-detail{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;overflow:auto}
 .cg-actions-row{display:flex;align-items:center;gap:0.375rem;padding:0.4375rem 0.75rem;border-bottom:1px solid var(--cg-border);flex-wrap:wrap;flex:none}
 
 /* ---------- 通用列表 ---------- */
@@ -8236,7 +8235,6 @@ async function selectCommit(repo, commit) {
     body: "",
     files: [],
     error: null,
-    file: null,
   };
   notify();
   try {
@@ -8291,39 +8289,12 @@ async function fetchCommitFileDiff(repo, hash, path, origPath, parents) {
   return res.stdout || "";
 }
 
-async function loadCommitFileDiff(repo, hash, path, origPath) {
-  const data = ensureRepoData(repo);
-  if (!data.selectedCommit || data.selectedCommit.hash !== hash) return;
-  data.selectedCommit = Object.assign({}, data.selectedCommit, {
-    file: { path, loading: true, text: "", files: [], error: null },
-  });
-  notify();
-  const stale = () =>
-    !data.selectedCommit ||
-    data.selectedCommit.hash !== hash ||
-    !data.selectedCommit.file ||
-    data.selectedCommit.file.path !== path;
-  try {
-    const parents = (data.selectedCommit.commit && data.selectedCommit.commit.parents) || [];
-    const text = await fetchCommitFileDiff(repo, hash, path, origPath, parents);
-    if (stale()) return;
-    data.selectedCommit = Object.assign({}, data.selectedCommit, {
-      file: { path, origPath: origPath || null, loading: false, text, files: parseUnifiedDiff(text), error: null },
-    });
-    notify();
-  } catch (error) {
-    if (stale()) return;
-    data.selectedCommit = Object.assign({}, data.selectedCommit, {
-      file: { path, loading: false, text: "", files: [], error: safeError(error) },
-    });
-    notify();
-  }
-}
-
-/** 打开提交中单个文件的差异弹窗（双击文件行或行尾按钮触发）。 */
+/** 打开提交中单个文件的差异弹窗（单击文件行、双击或行尾按钮触发）。 */
 let diffDialogSeq = 0;
 async function openCommitFileDiffDialog(repo, hash, item, commit) {
   if (!item) return;
+  // 同一文件已打开时复用当前弹窗，双击会先触发两次单击，避免重复请求。
+  if (state.diffDialog && state.diffDialog.hash === hash && state.diffDialog.path === item.path) return;
   state.diffDialog = {
     // 序号不随关闭归零，否则旧请求返回时会覆盖新弹窗的内容。
     id: (diffDialogSeq += 1),
@@ -8689,7 +8660,7 @@ function LogTab(props) {
             : null,
         ),
       ),
-      h(CommitDetail, { repo, data, view }),
+      h(CommitDetail, { repo, data }),
     ),
   );
 }
@@ -8868,7 +8839,7 @@ function FileTreeList(props) {
 
 function CommitDetail(props) {
   const h = appCtx.react.createElement;
-  const { repo, data, view } = props;
+  const { repo, data } = props;
   const s = useStoreSnapshot();
   const fileView = s.settings.fileView === "flat" ? "flat" : "tree";
   const selected = data.selectedCommit;
@@ -8880,7 +8851,6 @@ function CommitDetail(props) {
     );
   }
   const commit = selected.commit || {};
-  const file = selected.file;
   return h(
     "div",
     { className: "cg-log-detail" },
@@ -8959,8 +8929,7 @@ function CommitDetail(props) {
         ? fileView === "tree"
           ? h(FileTreeList, {
               files: selected.files,
-              activePath: file && file.path,
-              onSelect: (item) => loadCommitFileDiff(repo, selected.hash, item.path, item.origPath),
+              onSelect: (item) => openCommitFileDiffDialog(repo, selected.hash, item, commit),
               onActivate: (item) => openCommitFileDiffDialog(repo, selected.hash, item, commit),
             })
           : selected.files.map((item) =>
@@ -8968,9 +8937,8 @@ function CommitDetail(props) {
                 "div",
                 {
                   key: item.path + item.status,
-                  className: cx("cg-row", file && file.path === item.path ? "cg-selected" : ""),
-                  onClick: () => loadCommitFileDiff(repo, selected.hash, item.path, item.origPath),
-                  onDoubleClick: () => openCommitFileDiffDialog(repo, selected.hash, item, commit),
+                  className: "cg-row",
+                  onClick: () => openCommitFileDiffDialog(repo, selected.hash, item, commit),
                   title: item.origPath ? item.origPath + " → " + item.path : item.path,
                 },
                 h(Badge, { tone: statusTone(item.code) }, item.code),
@@ -8989,17 +8957,6 @@ function CommitDetail(props) {
               ),
             )
         : h("div", { className: "cg-notice" }, "该提交没有变更文件"),
-    ),
-    h(
-      "div",
-      { className: "cg-detail-diff" },
-      file
-        ? file.loading
-          ? h("div", { className: "cg-notice" }, "正在加载差异…")
-          : file.error
-            ? h(Banner, { tone: "error" }, file.error)
-            : h(ReadonlyDiff, { key: selected.hash + ":" + file.path, files: file.files, path: file.path, fallback: file.text })
-        : h("div", { className: "cg-notice" }, "选择上方文件查看该提交中的差异"),
     ),
   );
 }

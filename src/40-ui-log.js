@@ -19,7 +19,6 @@ async function selectCommit(repo, commit) {
     body: "",
     files: [],
     error: null,
-    file: null,
   };
   notify();
   try {
@@ -74,39 +73,12 @@ async function fetchCommitFileDiff(repo, hash, path, origPath, parents) {
   return res.stdout || "";
 }
 
-async function loadCommitFileDiff(repo, hash, path, origPath) {
-  const data = ensureRepoData(repo);
-  if (!data.selectedCommit || data.selectedCommit.hash !== hash) return;
-  data.selectedCommit = Object.assign({}, data.selectedCommit, {
-    file: { path, loading: true, text: "", files: [], error: null },
-  });
-  notify();
-  const stale = () =>
-    !data.selectedCommit ||
-    data.selectedCommit.hash !== hash ||
-    !data.selectedCommit.file ||
-    data.selectedCommit.file.path !== path;
-  try {
-    const parents = (data.selectedCommit.commit && data.selectedCommit.commit.parents) || [];
-    const text = await fetchCommitFileDiff(repo, hash, path, origPath, parents);
-    if (stale()) return;
-    data.selectedCommit = Object.assign({}, data.selectedCommit, {
-      file: { path, origPath: origPath || null, loading: false, text, files: parseUnifiedDiff(text), error: null },
-    });
-    notify();
-  } catch (error) {
-    if (stale()) return;
-    data.selectedCommit = Object.assign({}, data.selectedCommit, {
-      file: { path, loading: false, text: "", files: [], error: safeError(error) },
-    });
-    notify();
-  }
-}
-
-/** 打开提交中单个文件的差异弹窗（双击文件行或行尾按钮触发）。 */
+/** 打开提交中单个文件的差异弹窗（单击文件行、双击或行尾按钮触发）。 */
 let diffDialogSeq = 0;
 async function openCommitFileDiffDialog(repo, hash, item, commit) {
   if (!item) return;
+  // 同一文件已打开时复用当前弹窗，双击会先触发两次单击，避免重复请求。
+  if (state.diffDialog && state.diffDialog.hash === hash && state.diffDialog.path === item.path) return;
   state.diffDialog = {
     // 序号不随关闭归零，否则旧请求返回时会覆盖新弹窗的内容。
     id: (diffDialogSeq += 1),
@@ -472,7 +444,7 @@ function LogTab(props) {
             : null,
         ),
       ),
-      h(CommitDetail, { repo, data, view }),
+      h(CommitDetail, { repo, data }),
     ),
   );
 }
@@ -651,7 +623,7 @@ function FileTreeList(props) {
 
 function CommitDetail(props) {
   const h = appCtx.react.createElement;
-  const { repo, data, view } = props;
+  const { repo, data } = props;
   const s = useStoreSnapshot();
   const fileView = s.settings.fileView === "flat" ? "flat" : "tree";
   const selected = data.selectedCommit;
@@ -663,7 +635,6 @@ function CommitDetail(props) {
     );
   }
   const commit = selected.commit || {};
-  const file = selected.file;
   return h(
     "div",
     { className: "cg-log-detail" },
@@ -742,8 +713,7 @@ function CommitDetail(props) {
         ? fileView === "tree"
           ? h(FileTreeList, {
               files: selected.files,
-              activePath: file && file.path,
-              onSelect: (item) => loadCommitFileDiff(repo, selected.hash, item.path, item.origPath),
+              onSelect: (item) => openCommitFileDiffDialog(repo, selected.hash, item, commit),
               onActivate: (item) => openCommitFileDiffDialog(repo, selected.hash, item, commit),
             })
           : selected.files.map((item) =>
@@ -751,9 +721,8 @@ function CommitDetail(props) {
                 "div",
                 {
                   key: item.path + item.status,
-                  className: cx("cg-row", file && file.path === item.path ? "cg-selected" : ""),
-                  onClick: () => loadCommitFileDiff(repo, selected.hash, item.path, item.origPath),
-                  onDoubleClick: () => openCommitFileDiffDialog(repo, selected.hash, item, commit),
+                  className: "cg-row",
+                  onClick: () => openCommitFileDiffDialog(repo, selected.hash, item, commit),
                   title: item.origPath ? item.origPath + " → " + item.path : item.path,
                 },
                 h(Badge, { tone: statusTone(item.code) }, item.code),
@@ -772,17 +741,6 @@ function CommitDetail(props) {
               ),
             )
         : h("div", { className: "cg-notice" }, "该提交没有变更文件"),
-    ),
-    h(
-      "div",
-      { className: "cg-detail-diff" },
-      file
-        ? file.loading
-          ? h("div", { className: "cg-notice" }, "正在加载差异…")
-          : file.error
-            ? h(Banner, { tone: "error" }, file.error)
-            : h(ReadonlyDiff, { key: selected.hash + ":" + file.path, files: file.files, path: file.path, fallback: file.text })
-        : h("div", { className: "cg-notice" }, "选择上方文件查看该提交中的差异"),
     ),
   );
 }
