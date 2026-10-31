@@ -377,7 +377,13 @@ async function readWorkspaceFile(path, options) {
     }
   }
   const binary = bytesHaveNul(merged);
-  const decoded = binary ? { text: "", invalid: false } : decodeUtf8Strict(merged);
+  // 截断点可能落在多字节 UTF-8 中间，严格解码会把这种大文件误判成二进制；
+  // 截断内容不允许写回（调用方按 truncated 禁用编辑），这里只求可读。
+  const decoded = binary
+    ? { text: "", invalid: false }
+    : readFailed || truncated
+      ? { text: decodeUtf8(merged), invalid: false }
+      : decodeUtf8Strict(merged);
   return {
     text: decoded.text,
     bytes: merged,
@@ -414,8 +420,7 @@ function posixWriteScript(append) {
 }
 
 /** 写入工作区文件（UTF-8，无 BOM）。文本不能含 NUL。 */
-async function writeWorkspaceFile(path, text, options) {
-  const opts = options || {};
+async function writeWorkspaceFile(path, text) {
   const windows = shellIsWindows({ CCGIT_FILE: path });
   const chunks = chunkText(text, windows ? 12000 : 24000);
   if (!chunks.length) chunks.push("");
@@ -425,10 +430,6 @@ async function writeWorkspaceFile(path, text, options) {
       CCGIT_CHUNK: chunk,
     }, { description: "写入文件", timeoutMs: 30000, silent: true });
   };
-  if (opts.append) {
-    for (const chunk of chunks) await writeChunk(path, chunk, true);
-    return true;
-  }
   // 分块写直接作用于目标文件时，任一块失败就只剩半截内容；先写临时文件再整体替换。
   const tmp = path + ".cg-tmp";
   try {
@@ -446,10 +447,6 @@ async function writeWorkspaceFile(path, text, options) {
     throw error;
   }
   return true;
-}
-
-async function appendWorkspaceFile(path, text) {
-  return writeWorkspaceFile(path, text, { append: true });
 }
 
 async function removeWorkspaceFile(path) {

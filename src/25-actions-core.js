@@ -633,9 +633,14 @@ async function ensureFileDiff(repo, entry, mode, force) {
  */
 async function applyHunk(repo, file, hunk, action, selected) {
   if (!file || !hunk) return { ok: false };
-  const mode = action === "discard" ? "worktree" : action === "unstage" ? "staged" : "worktree";
+  // 新增/删除文件在补丁头里带 new/deleted file mode，只应用部分行会得到
+  // 行数不匹配或语义相反的补丁，git apply 直接拒绝；整块操作仍然有效。
+  if (selected && selected.size && (file.isNew || file.isDeleted)) {
+    toast("新增或删除的文件不支持按行操作，请整块暂存或丢弃", "warning");
+    return { ok: false };
+  }
   const part = selected && selected.size ? subsetHunk(hunk, selected, action !== "stage") : hunk;
-  const patch = part ? buildHunkPatch(file, part, mode) : "";
+  const patch = part ? buildHunkPatch(file, part) : "";
   if (!patch) {
     toast("无法从该差异构造补丁", "error");
     return { ok: false };
@@ -660,7 +665,7 @@ async function applyHunk(repo, file, hunk, action, selected) {
   }, { success: action === "discard" ? "已丢弃区块" : action === "unstage" ? "已取消暂存区块" : "已暂存区块" });
 }
 
-function buildHunkPatch(file, hunk, mode) {
+function buildHunkPatch(file, hunk) {
   if (!file || !hunk) return "";
   const meta = (file.meta || []).filter(
     (line) =>

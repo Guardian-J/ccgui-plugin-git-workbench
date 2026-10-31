@@ -814,7 +814,7 @@ function DiffFileBlock(props) {
   const [picked, setPicked] = useState({});
   const limit = Math.max(0, Math.min(MAX_DIFF_LINES, Number(props.budget) || MAX_DIFF_LINES));
   const split = state.settings.diffLayout === "split";
-  const selectable = !entry.unmerged && (mode === "staged" || (mode === "worktree" && entry.code !== "?"));
+  const selectable = !entry.unmerged && !file.isNew && !file.isDeleted && (mode === "staged" || (mode === "worktree" && entry.code !== "?"));
   const toggleLine = (hunkIndex, lineIndex) => {
     const next = Object.assign({}, picked);
     const set = new Set(next[hunkIndex] || []);
