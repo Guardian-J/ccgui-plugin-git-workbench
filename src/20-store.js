@@ -658,7 +658,7 @@ async function loadRepoStatus(path, force) {
         return;
       }
       const signature = computeStatusSignature(parsed);
-      const changed = invalidate || signature !== data.statusSignature;
+      const changed = invalidate || signature !== data.statusSignature || parsed.warnings !== (data.status.warnings || "");
       if (changed) {
         data.statusSignature = signature;
         data.statusGeneration = (data.statusGeneration || 0) + 1;
@@ -736,13 +736,35 @@ function computeStatusSignature(status) {
   return parts.join("\u0000");
 }
 
+/** 宿主按字节截断单流输出；多字节文本的字符数会低估实际字节数。 */
+function utf8ByteLength(text) {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+function outputTruncated(text) {
+  const value = String(text || "");
+  if (!value) return false;
+  if (value.length >= GIT_MAX_OUTPUT - 64) return true;
+  return utf8ByteLength(value) >= GIT_MAX_OUTPUT - 64;
+}
+
 /**
  * 普通行记录输出触达 64KB 上限时，最后一行可能被切断：丢弃最后一个换行之后的残片。
  * 仅按长度判定，不要求末尾换行——否则正常输出会被误裁。
  */
 function clipTruncatedLines(stdout) {
   const text = String(stdout || "");
-  if (text.length < GIT_MAX_OUTPUT - 64) return { text, truncated: false };
+  if (!outputTruncated(text)) return { text, truncated: false };
   const cut = text.lastIndexOf("\n");
   return { text: cut >= 0 ? text.slice(0, cut) : "", truncated: true };
 }
@@ -753,7 +775,7 @@ function clipTruncatedLines(stdout) {
  */
 function clipLogRecords(stdout) {
   const text = String(stdout || "");
-  const nearLimit = text.length >= GIT_MAX_OUTPUT - 64;
+  const nearLimit = outputTruncated(text);
   const complete = !text.length || text.endsWith("\x1e");
   if (!nearLimit && complete) return { text, truncated: false };
   const cut = text.lastIndexOf("\x1e");
@@ -766,7 +788,12 @@ function syncCheckedFiles(repo, status) {
   const entries = status.staged.concat(status.unstaged, status.untracked, status.conflicted);
   for (const entry of entries) {
     const key = entryKey(entry);
-    next[key] = existing[key] === undefined ? true : existing[key];
+    // 暂存/取消暂存会让同一路径在 s:/u: 之间换键；继承旧键的决定，
+    // 否则用户取消过的文件会在状态变化后重新变成已勾选，静默放大提交范围。
+    const alternateKey = (entry.staged ? "u:" : "s:") + entry.path;
+    if (existing[key] !== undefined) next[key] = existing[key];
+    else if (existing[alternateKey] !== undefined) next[key] = existing[alternateKey];
+    else next[key] = true;
   }
   state.checkedByRepo[repo] = next;
 }
@@ -1012,9 +1039,9 @@ function startWorkspacePolling() {
   if (pollTimer) clearInterval(pollTimer);
   const interval = Math.max(3, Number(state.settings.refreshInterval) || 8) * 1000;
   pollTimer = setInterval(() => {
-    void pollWorkspace();
+    void pollWorkspace().catch(() => undefined);
   }, interval);
-  void pollWorkspace();
+  void pollWorkspace().catch(() => undefined);
 }
 
 function pollWorkspace() {
@@ -1036,6 +1063,7 @@ async function pollWorkspaceOnce() {
   }
   const path = meta && meta.path ? normalizePath(meta.path) : "";
   if (path && pathKey(path) !== pathKey(state.workspacePath)) {
+    if (disposed) return;
     await setWorkspace(path);
     return;
   }

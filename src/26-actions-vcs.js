@@ -68,7 +68,7 @@ async function fetchRepo(repo, options) {
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
     return (res.stderr || res.stdout || "").trim();
-  }, { success: "已获取远程更新", details: true, log: true, quick: true });
+  }, { success: "已获取远程更新", details: true, log: true });
 }
 
 async function reportRequireBranch(repo, prefix) {
@@ -101,7 +101,7 @@ async function pullRepo(repo, options) {
       }
       throw new GitCommandError(message, res.entry);
     }
-    const output = (res.stdout || res.stderr || "").trim();
+    const output = ((res.stderr || "") + "\n" + (res.stdout || "")).trim();
     // --autostash 回放冲突时 git pull 仍以 0 退出，但工作区已留下冲突与未清理的 autostash。
     if (/resulted in conflicts/i.test(output)) {
       return { conflict: true, autostash: true, message: output };
@@ -109,7 +109,7 @@ async function pullRepo(repo, options) {
     return { conflict: false, message: output };
   }, { refresh: false, errorPrefix: "拉取失败" }).then(async (result) => {
     if (!result.ok) return result;
-    await refreshRepo(repo, { details: true, log: true, quick: true });
+    await refreshRepo(repo, { details: true, log: true });
     if (result.value && result.value.autostash) {
       toast("拉取完成，但自动贮藏回放冲突：请解决冲突，贮藏仍保留在 stash 中", "warning");
     } else if (result.value && result.value.conflict) {
@@ -155,7 +155,7 @@ async function pushCurrent(repo, options) {
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
     return (res.stderr || res.stdout || "").trim();
-  }, { success: "推送完成", details: true, quick: true });
+  }, { success: "推送完成", details: true });
 }
 
 async function updateProject(repo) {
@@ -229,7 +229,7 @@ async function checkoutBranch(repo, name, remote) {
     state.selectedFile = null;
     state.activeTab = "changes";
     return { branch: isRemote ? localName : name };
-  }, { success: "已检出 " + name, details: true, log: true, quick: true });
+  }, { success: "已检出 " + name, details: true, log: true });
 }
 
 async function createBranch(repo, name, startPoint) {
@@ -248,7 +248,7 @@ async function createBranch(repo, name, startPoint) {
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: 60000 });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
     return { branch: String(name).trim() };
-  }, { success: "已创建并检出分支 " + name, details: true, log: true, quick: true });
+  }, { success: "已创建并检出分支 " + name, details: true, log: true });
 }
 
 async function createBranchDialog(repo, startPoint) {
@@ -277,7 +277,7 @@ async function renameBranch(repo, oldName, newName) {
     const args = branch.head === oldName ? ["branch", "-m", newName] : ["branch", "-m", oldName, newName];
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: 30000 });
     if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
-  }, { success: "已重命名分支", details: true, quick: true });
+  }, { success: "已重命名分支", details: true });
 }
 
 async function renameBranchDialog(repo, oldName) {
@@ -304,7 +304,7 @@ async function deleteBranch(repo, name, force) {
       timeoutMs: 30000,
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
-  }, { success: "已删除分支 " + name, details: true, quick: true });
+  }, { success: "已删除分支 " + name, details: true });
 }
 
 async function mergeBranch(repo, ref, options) {
@@ -331,7 +331,7 @@ async function mergeBranch(repo, ref, options) {
     return { conflict: false, output };
   }, { refresh: false, errorPrefix: "合并失败" }).then(async (result) => {
     if (!result.ok) return result;
-    await refreshRepo(repo, { details: true, log: true, quick: true });
+    await refreshRepo(repo, { details: true, log: true });
     if (result.value.conflict) toast("合并产生冲突，请在“本地更改”中解决", "warning");
     else if (opts.squash) toast("已压缩合并（squash），更改已暂存", "success");
     else toast("合并完成", "success");
@@ -393,7 +393,7 @@ async function rebaseBranch(repo, onto) {
     return { conflict: false, output };
   }, { refresh: false, errorPrefix: "变基失败" }).then(async (result) => {
     if (!result.ok) return result;
-    await refreshRepo(repo, { details: true, log: true, quick: true });
+    await refreshRepo(repo, { details: true, log: true });
     if (result.value.autostash) {
       toast("变基完成，但自动贮藏回放冲突：请解决冲突，贮藏仍保留在 stash 中", "warning");
     } else {
@@ -471,7 +471,7 @@ async function cherryPickCommits(repo, hashes) {
     return { conflict: false, output };
   }, { refresh: false, errorPrefix: "拣选失败（Cherry-pick）" }).then(async (result) => {
     if (!result.ok) return result;
-    await refreshRepo(repo, { details: true, log: true, quick: true });
+    await refreshRepo(repo, { details: true, log: true });
     toast(result.value.conflict ? "拣选产生冲突（Cherry-pick）" : "拣选完成（Cherry-pick）", result.value.conflict ? "warning" : "success");
     return result;
   });
@@ -498,7 +498,7 @@ async function revertCommit(repo, hash) {
     return { conflict: false, output };
   }, { refresh: false, errorPrefix: "还原失败" }).then(async (result) => {
     if (!result.ok) return result;
-    await refreshRepo(repo, { details: true, log: true, quick: true });
+    await refreshRepo(repo, { details: true, log: true });
     toast(result.value.conflict ? "还原产生冲突" : "已还原提交", result.value.conflict ? "warning" : "success");
     return result;
   });
@@ -519,7 +519,7 @@ async function resetTo(repo, hash, mode) {
       timeoutMs: 60000,
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
-  }, { success: "已重置到 " + shortHash(hash), details: true, log: true, quick: true });
+  }, { success: "已重置到 " + shortHash(hash), details: true, log: true });
 }
 
 async function resetDialog(repo, hash) {
@@ -557,7 +557,7 @@ async function checkoutCommit(repo, hash) {
   return perform(repo, "检出提交", async () => {
     const res = await runGit(repo, ["checkout", hash], { allowFailure: true, timeoutMs: 60000 });
     if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
-  }, { success: "已检出提交", details: true, log: true, quick: true });
+  }, { success: "已检出提交", details: true, log: true });
 }
 
 async function tagCommit(repo, hash, name, message) {
@@ -621,7 +621,7 @@ async function dropCommit(repo, hash) {
     return { conflict: false, output };
   }, { refresh: false, errorPrefix: "删除提交失败" }).then(async (result) => {
     if (!result.ok) return result;
-    await refreshRepo(repo, { details: true, log: true, quick: true });
+    await refreshRepo(repo, { details: true, log: true });
     toast(result.value.conflict ? "删除提交产生冲突" : "已删除提交", result.value.conflict ? "warning" : "success");
     return result;
   });
@@ -654,7 +654,7 @@ async function squashLast(repo, count, message) {
       }
       throw new GitCommandError((commit.stderr || commit.stdout || "").trim(), commit.entry);
     }
-  }, { success: "已压缩 " + n + " 个提交", details: true, log: true, quick: true });
+  }, { success: "已压缩 " + n + " 个提交", details: true, log: true });
 }
 
 async function squashDialog(repo) {
@@ -703,7 +703,7 @@ async function editCommitMessageDialog(repo, hash) {
       timeoutMs: 60000,
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-  }, { success: "已修改提交信息", details: true, log: true, quick: true });
+  }, { success: "已修改提交信息", details: true, log: true });
 }
 
 /* ---------- 合并/变基/Cherry-pick 的继续与中止 ---------- */
@@ -719,7 +719,7 @@ async function continueOperation(repo) {
     else throw new Error("当前没有进行中的合并、变基或拣选（Cherry-pick）");
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: 180000 });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-  }, { success: "操作已继续", details: true, log: true, quick: true });
+  }, { success: "操作已继续", details: true, log: true });
 }
 
 async function abortOperation(repo) {
@@ -740,7 +740,7 @@ async function abortOperation(repo) {
     else throw new Error("当前没有进行中的合并、变基或拣选（Cherry-pick）");
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: 60000 });
     if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
-  }, { success: "已中止操作", details: true, log: true, quick: true });
+  }, { success: "已中止操作", details: true, log: true });
 }
 
 async function skipOperation(repo) {
@@ -753,7 +753,7 @@ async function skipOperation(repo) {
     else throw new Error("当前操作不支持跳过");
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: 180000 });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-  }, { success: "已跳过", details: true, log: true, quick: true });
+  }, { success: "已跳过", details: true, log: true });
 }
 
 async function resolveConflict(repo, path, side) {
@@ -762,20 +762,32 @@ async function resolveConflict(repo, path, side) {
     return { ok: false };
   }
   return perform(repo, "解决冲突", async () => {
+    // modify/delete 冲突中某一侧可能没有文件版本：采用该侧等于保留删除。
+    const stage = side === "ours" ? 2 : 3;
+    const listing = await runGit(repo, ["ls-files", "-u", "--", path], {
+      allowFailure: true,
+      timeoutMs: 15000,
+    });
+    const hasStage = listing.code === 0 && new RegExp("(^|\\n)\\d+ [0-9a-f]+ " + stage + "\\t").test(listing.stdout || "");
+    if (!hasStage) {
+      const removed = await runGit(repo, ["rm", "-f", "--", path], { allowFailure: true, timeoutMs: 30000 });
+      if (removed.code !== 0) throw new GitCommandError((removed.stderr || "").trim(), removed.entry);
+      return;
+    }
     const res = await runGit(repo, ["checkout", "--" + side, "--", path], {
       allowFailure: true,
       timeoutMs: 30000,
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
     await runGit(repo, ["add", "--", path], { timeoutMs: 30000 });
-  }, { success: "已采用 " + (side === "ours" ? "ours" : "theirs") + " 版本", details: true, quick: true });
+  }, { success: "已采用 " + (side === "ours" ? "ours" : "theirs") + " 版本", details: true });
 }
 
 async function saveConflictFile(repo, path, text) {
   return perform(repo, "保存冲突文件", async () => {
     await writeWorkspaceFile(joinPath(repo, path), text);
     await runGit(repo, ["add", "--", path], { timeoutMs: 30000 });
-  }, { success: "已保存并标记为已解决", details: true, quick: true });
+  }, { success: "已保存并标记为已解决", details: true });
 }
 
 /* ---------- 暂存（stash） ---------- */
@@ -790,6 +802,9 @@ async function createStash(repo, options) {
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: 60000 });
     if (res.code !== 0) {
       if (/unknown subcommand|unknown option/i.test(res.stderr || "")) {
+        if (opts.includeUntracked || opts.keepIndex) {
+          throw new Error("当前 git 版本不支持 stash push 的 --include-untracked/--keep-index，请升级 git");
+        }
         const legacy = ["stash", "save"];
         if (opts.message) legacy.push(opts.message);
         const fallback = await runGit(repo, legacy, { allowFailure: true, timeoutMs: 60000 });
@@ -800,7 +815,7 @@ async function createStash(repo, options) {
       }
       throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
     }
-  }, { success: "已创建贮藏", details: true, quick: true });
+  }, { success: "已创建贮藏", details: true });
 }
 
 async function stashDialog(repo) {
@@ -854,7 +869,7 @@ async function stashApply(repo, selector, action) {
     return { conflict: false, output };
   }, { refresh: false, errorPrefix: "贮藏操作失败" }).then(async (result) => {
     if (!result.ok) return result;
-    await refreshRepo(repo, { details: true, log: true, quick: true });
+    await refreshRepo(repo, { details: true, log: true });
     toast(result.value.conflict ? "应用贮藏产生冲突" : "贮藏操作完成", result.value.conflict ? "warning" : "success");
     return result;
   });
@@ -888,7 +903,7 @@ async function stashBranch(repo, selector) {
       timeoutMs: 120000,
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-  }, { success: "已从贮藏创建分支", details: true, log: true, quick: true });
+  }, { success: "已从贮藏创建分支", details: true, log: true });
 }
 
 async function loadStashDiff(repo, selector, hash) {
@@ -943,7 +958,7 @@ async function clearStashes(repo) {
   if (!confirmed) return { ok: false };
   return perform(repo, "清空贮藏", async () => {
     await runGit(repo, ["stash", "clear"], { timeoutMs: 30000 });
-  }, { success: "已清空贮藏", details: true, quick: true });
+  }, { success: "已清空贮藏", details: true });
 }
 
 /* ---------- 标签 ---------- */
@@ -1054,7 +1069,7 @@ async function removeRemote(repo, name) {
   return perform(repo, "删除远程", async () => {
     const res = await runGit(repo, ["remote", "remove", "--", name], { allowFailure: true, timeoutMs: 30000 });
     if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
-  }, { success: "已删除远程", details: true, quick: true });
+  }, { success: "已删除远程", details: true });
 }
 
 async function renameRemoteDialog(repo, name) {
@@ -1080,6 +1095,11 @@ async function setRemoteUrlDialog(repo, name, currentUrl) {
     confirmLabel: "保存",
   });
   if (!values || !values.url) return { ok: false };
+  // 展示层脱敏值（***）写回会覆盖真实凭证，直接拒绝。
+  if (/\*\*\*/.test(values.url)) {
+    toast("地址包含脱敏占位符 ***，请填写完整地址", "error");
+    return { ok: false };
+  }
   return perform(repo, "修改远程地址", async () => {
     const res = await runGit(repo, ["remote", "set-url", "--", name, values.url], {
       allowFailure: true,
@@ -1108,7 +1128,7 @@ async function updateSubmodules(repo) {
       timeoutMs: 300000,
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-  }, { success: "子模块已更新", details: true, quick: true });
+  }, { success: "子模块已更新", details: true });
 }
 
 async function syncSubmodules(repo) {
@@ -1137,7 +1157,7 @@ async function addSubmoduleDialog(repo) {
       timeoutMs: NETWORK_TIMEOUT_MS,
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-  }, { success: "子模块已添加", details: true, quick: true });
+  }, { success: "子模块已添加", details: true });
 }
 
 async function createWorktreeDialog(repo) {
@@ -1190,7 +1210,7 @@ async function createWorktreeDialog(repo) {
     }
     const res = await runGit(repo, args, { allowFailure: true, timeoutMs: 120000 });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-  }, { success: "工作树已创建", details: true, quick: true });
+  }, { success: "工作树已创建", details: true });
 }
 
 async function removeWorktree(repo, path) {
@@ -1296,5 +1316,5 @@ async function runConsoleCommand(repo, input) {
       return { code: res.code, output: res.stdout, error: res.stderr };
     }
     return { code: 0, output: res.stdout, error: res.stderr };
-  }, { refresh: true, details: true, log: true, quick: true, errorPrefix: "命令失败" });
+  }, { refresh: true, details: true, log: true, errorPrefix: "命令失败" });
 }

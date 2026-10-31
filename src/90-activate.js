@@ -160,7 +160,7 @@ function registerGitWorkbench(ctx) {
     title: () => "Git：刷新状态",
     keywords: () => ["git", "refresh", "status"],
     run: () => {
-      void ensureRepoForCommand().then((repo) => repo && refreshRepo(repo, { details: true, quick: true }));
+      void ensureRepoForCommand().then((repo) => repo && refreshRepo(repo, { details: true }));
     },
   }));
   add(ctx.ui.registerCommand({
@@ -320,10 +320,17 @@ export default function activate(ctx) {
   }
   const dispose = registerGitWorkbench(ctx);
   void (async () => {
-    await loadSettings();
-    await syncWorkspaceFromHost();
-    state.ready = true;
-    notify();
+    try {
+      await loadSettings();
+      if (disposed) return;
+      await syncWorkspaceFromHost();
+      if (disposed) return;
+      state.ready = true;
+      notify();
+    } catch (error) {
+      // 热重载期间 appCtx 已被置空，此时不再向用户报错。
+      if (!disposed) reportError(error, "Git 插件初始化");
+    }
   })();
   return dispose;
 }

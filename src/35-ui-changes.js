@@ -73,6 +73,9 @@ function ChangesPanel(props) {
     data.status.truncated
       ? h(Banner, { tone: "error" }, "git status 输出达到 64KB 上限，文件列表可能不完整。建议分批提交或增加忽略规则。")
       : null,
+    !data.status.truncated && data.status.warnings
+      ? h(Banner, { tone: "error" }, "git status 报告了警告，部分路径可能未列出：" + truncate(data.status.warnings, 300))
+      : null,
     data.error ? h(Banner, { tone: "error" }, data.error) : null,
     h(OperationBanner, { repo, data }),
     h(
@@ -92,7 +95,9 @@ function ChangesPanel(props) {
           onKeyDown: (event) => onFileListKey(event, repo, data, shownGroups, selection, s.settings.fileView === "flat"),
         },
         !groups.length
-          ? h(Empty, { icon: "check", title: "没有本地更改" }, h("span", null, "工作区干净"))
+          ? data.loading.status && !data.statusAt
+            ? h(Empty, { icon: "refresh", title: "正在读取工作区状态…" }, h(Spinner, null))
+            : h(Empty, { icon: "check", title: "没有本地更改" }, h("span", null, "工作区干净"))
           : shownGroups.length
             ? shownGroups.map((group) => h(ChangeGroup, { key: group.key, repo, data, group, selection, flat: s.settings.fileView === "flat" }))
             : h(Empty, { icon: "search", title: "没有匹配的文件" }, h("span", null, "调整筛选条件")),
@@ -165,7 +170,7 @@ function FileFilterBar(props) {
   const view = state.settings.fileView === "flat" ? "flat" : "tree";
   const setFilter = (value) => {
     data.fileFilter = value;
-    notify();
+    notifyDeferred();
   };
   if (!total) return null;
   return h(
@@ -276,7 +281,7 @@ function ChangesToolbar(props) {
       : null,
     h("div", { className: "cg-header-sep" }),
     h(IconBtn, { name: "stash", label: "贮藏本地更改", onClick: () => stashDialog(repo) }),
-    h(IconBtn, { name: "refresh", label: "刷新", onClick: () => refreshRepo(repo, { details: true, quick: true }) }),
+    h(IconBtn, { name: "refresh", label: "刷新", onClick: () => refreshRepo(repo, { details: true }) }),
   );
 }
 
@@ -707,6 +712,9 @@ function FileDiffView(props) {
       }, "忽略空白"),
     ),
     cache && cache.error ? h(Banner, { tone: "error" }, cache.error) : null,
+    cache && cache.preview && cache.preview.error
+      ? h(Banner, { tone: "error" }, cache.preview.error)
+      : null,
     entry.unmerged
       ? h(
           Banner,
@@ -717,7 +725,7 @@ function FileDiffView(props) {
               { style: { display: "flex", gap: "0.25rem", flexWrap: "wrap" } },
               h(Btn, { size: "sm", onClick: () => resolveConflict(repo, entry.path, "ours") }, "采用我方"),
               h(Btn, { size: "sm", onClick: () => resolveConflict(repo, entry.path, "theirs") }, "采用对方"),
-              cache && cache.preview && !cache.preview.binary && !cache.preview.truncated
+              cache && cache.preview && !cache.preview.binary && !cache.preview.truncated && !cache.preview.error
                 ? h(Btn, { size: "sm", icon: "edit", onClick: startEdit }, "编辑并解决")
                 : null,
             ),
@@ -809,9 +817,13 @@ function PreviewFile(props) {
 
 function DiffFileBlock(props) {
   const h = appCtx.react.createElement;
-  const { useState } = appCtx.react;
+  const { useEffect, useState } = appCtx.react;
   const { repo, entry, file, mode, refresh } = props;
   const [picked, setPicked] = useState({});
+  // 差异重新解析后行号会变，旧选择必须作废，否则会暂存/丢弃到错误行。
+  useEffect(() => {
+    setPicked({});
+  }, [file]);
   const limit = Math.max(0, Math.min(MAX_DIFF_LINES, Number(props.budget) || MAX_DIFF_LINES));
   const split = state.settings.diffLayout === "split";
   const selectable = !entry.unmerged && !file.isNew && !file.isDeleted && (mode === "staged" || (mode === "worktree" && entry.code !== "?"));
@@ -997,9 +1009,23 @@ function CommitBox(props) {
   const h = appCtx.react.createElement;
   const { repo, data } = props;
   const s = useStoreSnapshot();
-  const { useState } = appCtx.react;
+  const { useEffect, useState } = appCtx.react;
   const [historyOpen, setHistoryOpen] = useState(false);
   const [optsOpen, setOptsOpen] = useState(false);
+  useEffect(() => {
+    setHistoryOpen(false);
+    setOptsOpen(false);
+  }, [repo]);
+  useEffect(() => {
+    if (!historyOpen && !optsOpen) return;
+    const onDown = (event) => {
+      if (event.target && event.target.closest && event.target.closest(".cg-commit-pop")) return;
+      setHistoryOpen(false);
+      setOptsOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [historyOpen, optsOpen]);
   const message = s.drafts[repo] || "";
   const checked = checkedPaths(repo);
   const stagedCount = data.status.staged.length;
@@ -1019,7 +1045,17 @@ function CommitBox(props) {
   };
   return h(
     "div",
-    { className: "cg-commitbox" },
+    {
+      className: "cg-commitbox",
+      onKeyDown: (event) => {
+        if (event.key === "Escape" && (historyOpen || optsOpen)) {
+          event.preventDefault();
+          event.stopPropagation();
+          setHistoryOpen(false);
+          setOptsOpen(false);
+        }
+      },
+    },
     conflicts
       ? h(Banner, { tone: "error" }, "还有 " + conflicts + " 个未解决冲突，解决前无法提交。")
       : null,

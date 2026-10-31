@@ -45,7 +45,8 @@ function parseStatusPorcelain(raw, stderr, version) {
   const text = String(raw || "");
   const status = emptyStatus();
   // 字节数是宿主上限，字符数只在小输出上等价；末尾不是 NUL 说明记录被切断。
-  status.truncated = text.length >= GIT_MAX_OUTPUT - 64 || (text.length > 0 && !text.endsWith("\0"));
+  status.truncated = outputTruncated(text) || (text.length > 0 && !text.endsWith("\0"));
+  status.warnings = String(stderr || "").trim();
   const looksV1 = /^## /.test(text.replace(/^\uFEFF/, ""));
   const looksV2 = /(^|\0)# branch\.|(^|\0)[12u?] /.test(text);
   if (looksV1 && !looksV2) return parseStatusV1(text, status);
@@ -221,10 +222,14 @@ function parseLog(raw) {
     if (!text) continue;
     const fields = text.split("\x1f");
     if (fields.length < 7) continue;
-    const refs = String(fields[5] || "")
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean);
+    // %D 里含逗号的分支名（如 feat,bug）不能按逗号切碎；只有以已知引用前缀开头的
+    // token 才是新条目，其余 token 属于上一个名称。
+    const refs = [];
+    for (const token of String(fields[5] || "").split(", ")) {
+      if (!token) continue;
+      if (!refs.length || /^(HEAD -> |tag: |refs\/)/.test(token)) refs.push(token);
+      else refs[refs.length - 1] += ", " + token;
+    }
     const branches = [];
     const tags = [];
     const remotes = [];
@@ -363,9 +368,14 @@ function parseRemotes(raw) {
     const m = line.match(/^(\S+)\s+(.+?)\s+\((fetch|push)\)\s*$/);
     if (!m) continue;
     const name = m[1];
-    const item = byName.get(name) || { name, fetchUrl: "", pushUrl: "" };
-    if (m[3] === "fetch") item.fetchUrl = maskSecrets(m[2]);
-    else item.pushUrl = maskSecrets(m[2]);
+    const item = byName.get(name) || { name, fetchUrl: "", pushUrl: "", fetchUrlRaw: "", pushUrlRaw: "" };
+    if (m[3] === "fetch") {
+      item.fetchUrlRaw = m[2];
+      item.fetchUrl = maskSecrets(m[2]);
+    } else {
+      item.pushUrlRaw = m[2];
+      item.pushUrl = maskSecrets(m[2]);
+    }
     byName.set(name, item);
   }
   return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
@@ -496,6 +506,30 @@ function parseUnifiedDiff(raw) {
         newLine: "",
       };
       hunk = null;
+      continue;
+    }
+    if (!file && line.startsWith("--- ")) {
+      // 标准 unified diff（diff -u / diff -ruN）没有 diff --git 头：从 ---/+++ 起一条记录，
+      // 否则 applyPatch 的“与已暂存内容重叠”保护拿不到受影响路径。
+      file = {
+        header: "",
+        oldPath: null,
+        newPath: null,
+        name: "",
+        binary: false,
+        hunks: [],
+        meta: [],
+        adds: 0,
+        dels: 0,
+        isNew: false,
+        isDeleted: false,
+        isRename: false,
+        oldLine: "",
+        newLine: "",
+      };
+      hunk = null;
+      file.oldLine = line;
+      file.oldPath = parseGitDiffPath(line.slice(4));
       continue;
     }
     if (!file) continue;

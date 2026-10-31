@@ -145,7 +145,7 @@ function WorkbenchHeader() {
       name: "refresh",
       label: "刷新当前仓库",
       disabled: !s.activeRepo,
-      onClick: () => s.activeRepo && refreshRepo(s.activeRepo, { details: true, log: true, quick: true }),
+      onClick: () => s.activeRepo && refreshRepo(s.activeRepo, { details: true, log: true }),
     }),
     h(IconBtn, {
       name: "terminal",

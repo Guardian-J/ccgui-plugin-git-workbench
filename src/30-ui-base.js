@@ -657,6 +657,8 @@ function OverlayHost() {
     document.body.style.overflow = "hidden";
     const focusFirst = () => {
       const scope = workbenchFocusScope(root);
+      // 关闭差异弹窗/确认框时 cleanup 已把焦点还给触发元素，此时不要再抢焦点。
+      if (document.activeElement && scope.contains(document.activeElement)) return;
       const target = scope === root
         ? root.querySelector(".cg-workbench-close") || workbenchFocusables(root)[0]
         : workbenchFocusables(scope)[0];

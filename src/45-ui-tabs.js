@@ -37,7 +37,7 @@ async function checkoutTag(repo, name) {
       timeoutMs: 60000,
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-  }, { success: "已检出标签", details: true, log: true, quick: true });
+  }, { success: "已检出标签", details: true, log: true });
 }
 
 async function unsetUpstream(repo, branch) {
@@ -47,7 +47,7 @@ async function unsetUpstream(repo, branch) {
       timeoutMs: 30000,
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
-  }, { success: "已取消上游分支", details: true, quick: true });
+  }, { success: "已取消上游分支", details: true });
 }
 
 async function setUpstream(repo, branch, upstream) {
@@ -57,7 +57,7 @@ async function setUpstream(repo, branch, upstream) {
       timeoutMs: 30000,
     });
     if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
-  }, { success: "已设置上游分支", details: true, quick: true });
+  }, { success: "已设置上游分支", details: true });
 }
 
 async function setUpstreamDialog(repo, branch) {
@@ -89,7 +89,7 @@ async function removeSubmodule(repo, path) {
       timeoutMs: 60000,
     });
     if (second.code !== 0) throw new GitCommandError((second.stderr || second.stdout || "").trim(), second.entry);
-  }, { success: "子模块已删除", details: true, quick: true });
+  }, { success: "子模块已删除", details: true });
 }
 
 /* ---------- 分支 ---------- */
@@ -483,7 +483,7 @@ function RemotesTab(props) {
                 { className: "cg-list-actions" },
                 h(IconBtn, { name: "fetch", label: "获取远程更新（Fetch）", size: 13, onClick: () => fetchRepo(repo, { remote: remote.name, prune: s.settings.fetchPrune }) }),
                 h(IconBtn, { name: "trash", label: "清理已删除的远程分支（Prune）", size: 13, onClick: () => pruneRemote(repo, remote.name) }),
-                h(IconBtn, { name: "edit", label: "修改地址", size: 13, onClick: () => setRemoteUrlDialog(repo, remote.name, remote.fetchUrl) }),
+                h(IconBtn, { name: "edit", label: "修改地址", size: 13, onClick: () => setRemoteUrlDialog(repo, remote.name, remote.fetchUrlRaw || remote.fetchUrl) }),
                 h(IconBtn, {
                   name: "more",
                   label: "更多",
@@ -493,9 +493,9 @@ function RemotesTab(props) {
                     openContextMenu(rect.left, rect.bottom + 2, [
                       { label: "获取远程更新（Fetch）", icon: "fetch", onClick: () => fetchRepo(repo, { remote: remote.name, prune: s.settings.fetchPrune }) },
                       { label: "清理已删除的远程分支（Prune）", icon: "trash", onClick: () => pruneRemote(repo, remote.name) },
-                      { label: "修改地址", icon: "edit", onClick: () => setRemoteUrlDialog(repo, remote.name, remote.fetchUrl) },
+                      { label: "修改地址", icon: "edit", onClick: () => setRemoteUrlDialog(repo, remote.name, remote.fetchUrlRaw || remote.fetchUrl) },
                       { label: "重命名", icon: "edit", onClick: () => renameRemoteDialog(repo, remote.name) },
-                      { label: "复制地址", icon: "copy", onClick: () => copyText(remote.fetchUrl) },
+                      { label: "复制地址", icon: "copy", onClick: () => copyText(remote.fetchUrlRaw || remote.fetchUrl) },
                       { separator: true },
                       { label: "删除远程", icon: "trash", danger: true, onClick: () => removeRemote(repo, remote.name) },
                     ]);
@@ -598,7 +598,7 @@ function SubmodulesTab(props) {
                 h(IconBtn, { name: "refresh", label: "更新此子模块", size: 13, onClick: () => perform(repo, "更新子模块", async () => {
                   const res = await runGit(repo, ["submodule", "update", "--init", "--recursive", "--", item.path], { allowFailure: true, timeoutMs: 300000 });
                   if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-                }, { success: "子模块已更新", details: true, quick: true }) }),
+                }, { success: "子模块已更新", details: true }) }),
                 h(IconBtn, { name: "copy", label: "复制路径", size: 13, onClick: () => copyText(item.path) }),
                 h(IconBtn, { name: "trash", label: "删除子模块", size: 13, onClick: () => removeSubmodule(repo, item.path) }),
               ),
@@ -696,6 +696,12 @@ function ConsoleTab(props) {
 
 function SettingsTab(props) {
   const repo = props.repo;
+  const { useEffect } = appCtx.react;
+  useEffect(() => {
+    if (!repo) return;
+    const data = ensureRepoData(repo);
+    if (!data.config) void loadConfig(repo);
+  }, [repo]);
   return appCtx.react.createElement(SettingsForm, { repo });
 }
 

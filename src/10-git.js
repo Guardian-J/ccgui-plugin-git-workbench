@@ -315,7 +315,8 @@ const POWERSHELL_B64_PREFIX =
   "[Convert]::ToBase64String($buf,0,$n)}finally{$fs.Close()}";
 
 const POSIX_B64_READ =
-  '[ -f "$CCGIT_FILE" ] || exit 3; tail -c +$((CCGIT_OFFSET + 1)) "$CCGIT_FILE" | head -c "$CCGIT_LEN" | base64';
+  '[ -f "$CCGIT_FILE" ] || exit 3; t=$(mktemp) || exit 4; trap \'rm -f "$t"\' EXIT; ' +
+  'tail -c +$((CCGIT_OFFSET + 1)) "$CCGIT_FILE" > "$t" || exit 5; head -c "$CCGIT_LEN" "$t" | base64';
 
 /**
  * 读取工作区文件。返回 {text, bytes, binary, truncated, size}；文件不存在返回 null。

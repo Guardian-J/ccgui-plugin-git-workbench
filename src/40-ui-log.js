@@ -326,10 +326,26 @@ function LogTab(props) {
   }, [repo]);
   const searchRef = useRef(view.filter.text || "");
   const authorRef = useRef(view.filter.author || "");
+  const searchInputRef = useRef(null);
+  const authorInputRef = useRef(null);
   useEffect(() => {
     searchRef.current = view.filter.text || "";
     authorRef.current = view.filter.author || "";
-  }, [view.filter.text, view.filter.author]);
+    // 非受控输入只在筛选值来自外部（退出文件历史、切仓）时同步，避免打断正在输入的光标。
+    if (searchInputRef.current && searchInputRef.current.value !== (view.filter.text || "")) {
+      searchInputRef.current.value = view.filter.text || "";
+    }
+    if (authorInputRef.current && authorInputRef.current.value !== (view.filter.author || "")) {
+      authorInputRef.current.value = view.filter.author || "";
+    }
+  }, [repo, view.filter.text, view.filter.author]);
+  // 文件历史被切仓清空后，--follow 路径不能残留在普通提交图里。
+  useEffect(() => {
+    if (!historyPath && view.filter.path) {
+      view.filter.path = "";
+      void loadLog(repo, true);
+    }
+  }, [repo, historyPath, view.filter.path]);
   const applyFilter = () => {
     void loadLog(repo, true, {
       filter: { text: searchRef.current.trim(), author: authorRef.current.trim() },
@@ -338,6 +354,8 @@ function LogTab(props) {
   const clearFilter = () => {
     searchRef.current = "";
     authorRef.current = "";
+    if (searchInputRef.current) searchInputRef.current.value = "";
+    if (authorInputRef.current) authorInputRef.current.value = "";
     void loadLog(repo, true, { filter: { text: "", author: "" } });
   };
   const exitHistory = () => {
@@ -360,7 +378,7 @@ function LogTab(props) {
       historyPath ? h(IconBtn, { name: "x", label: "退出文件历史", onClick: exitHistory }) : null,
       h("div", { style: { flex: 1 } }),
       h("input", {
-        key: "author:" + view.filter.author,
+        ref: authorInputRef,
         className: "cg-input cg-filter-input",
         placeholder: "作者",
         defaultValue: view.filter.author || "",
@@ -377,7 +395,7 @@ function LogTab(props) {
         },
       }),
       h("input", {
-        key: "search:" + view.filter.text,
+        ref: searchInputRef,
         className: "cg-input cg-filter-input",
         placeholder: "搜索提交信息",
         defaultValue: view.filter.text || "",

@@ -8,6 +8,11 @@ async function refreshRepo(repo, options) {
   // 主动刷新一律视为内容变化：让 statusGeneration 递增，差异缓存随之失效。
   // 否则文件内容变了但状态码没变（已修改文件再次编辑）时，预览不会重载。
   ensureRepoData(repo).statusInvalidate = true;
+  // 只要侧栏指示（分支与更改计数）时走轻量 status，避免为每个仓库拉完整 diff 状态。
+  if (opts.quick && !opts.details && !opts.log) {
+    await loadQuickStatusFor(repo);
+    return;
+  }
   // loadRepoStatus 成功后会同步 data.quick（分支与计数），无需再单独拉一次 quick。
   await loadRepoStatus(repo, true);
   if (opts.details) await loadRepoDetails(repo, true);
@@ -31,6 +36,9 @@ async function perform(repo, label, task, options) {
         return { ok: true, value };
       } catch (error) {
         const text = reportError(error, opts.errorPrefix || label);
+        // 部分失败发生在状态已改动之后（钩子拒绝提交、--3way 留下冲突标记等）；
+        // 失败也刷新一次，避免界面与索引/工作区脱节。
+        if (repo) await refreshRepo(repo, { details: true }).catch(() => undefined);
         return { ok: false, error, text };
       }
     }),
@@ -213,18 +221,28 @@ async function discardPaths(repo, entries) {
   const list = entries && entries.length ? entries : [];
   if (!list.length) return { ok: true };
   const names = list.map((entry) => entry.path);
+  const data = ensureRepoData(repo);
   const untrackedOnly = list.every((entry) => entry.code === "?" && !entry.staged);
+  const addedOnly =
+    !untrackedOnly &&
+    list.every(
+      (entry) =>
+        entry.staged &&
+        entry.x === "A" &&
+        !data.status.unstaged.some((item) => item.path === entry.path),
+    );
+  const deleteOnly = untrackedOnly || addedOnly;
   const confirmed = await confirmDestructive({
-    title: untrackedOnly ? "删除未跟踪文件" : "回滚更改",
-    message: untrackedOnly
-      ? "将永久删除 " + names.length + " 个未跟踪文件，且无法从 Git 恢复。"
+    title: deleteOnly ? "删除未提交文件" : "回滚更改",
+    message: deleteOnly
+      ? "将永久删除 " + names.length + " 个从未提交的文件，且无法从 Git 恢复。"
       : "将丢弃 " + names.length + " 个文件的本地更改，且不可恢复。",
     detail: names.slice(0, 12).join("\n") + (names.length > 12 ? "\n…" : ""),
-    confirmLabel: untrackedOnly ? "删除" : "回滚",
+    confirmLabel: deleteOnly ? "删除" : "回滚",
     danger: true,
   });
   if (!confirmed) return { ok: false, canceled: true };
-  return perform(repo, untrackedOnly ? "删除未跟踪文件" : "回滚更改", async () => {
+  return perform(repo, deleteOnly ? "删除未提交文件" : "回滚更改", async () => {
     const untracked = [];
     const added = [];
     const restoreFromIndex = [];
@@ -337,7 +355,7 @@ async function discardPaths(repo, entries) {
       if (res.code !== 0) throw new GitCommandError((res.stderr || "").trim(), res.entry);
     }
     return { count: list.length };
-  }, { success: untrackedOnly ? "已删除 " + names.length + " 个未跟踪文件" : "已回滚 " + names.length + " 个文件", details: false });
+  }, { success: deleteOnly ? "已删除 " + names.length + " 个未提交文件" : "已回滚 " + names.length + " 个文件", details: false });
 }
 
 async function hasHeadCommit(repo) {
@@ -384,8 +402,8 @@ async function resetIndexFlags(repo) {
     for (const token of res.stdout.split("\0")) {
       if (token.length < 3 || token[1] !== " ") continue;
       const path = token.slice(2);
-      if (token[0] === "h") assume.push(path);
-      else if (token[0] === "S") skip.push(path);
+      if (token[0] === "h" || token[0] === "s") assume.push(path);
+      if (token[0] === "S" || token[0] === "s") skip.push(path);
     }
     if (assume.length) {
       await runGit(repo, ["update-index", "--no-assume-unchanged", "--"].concat(assume), {
@@ -458,17 +476,33 @@ async function commitChanges(repo, options) {
     toast("请先勾选要提交的文件", "error");
     return { ok: false };
   }
+  // 同一文件的已暂存/未暂存条目必须一起勾选：--only 提交的是工作区内容，
+  // 只勾其中一组会静默带上另一组未经审阅的改动。
+  const checkedSet = new Set(checkedKeys(repo));
+  const groupEntries = data.status.staged.concat(data.status.unstaged, data.status.untracked);
+  const byPath = new Map();
+  for (const item of groupEntries) {
+    const bucket = byPath.get(item.path) || [];
+    bucket.push(item);
+    byPath.set(item.path, bucket);
+  }
+  for (const [path, items] of byPath) {
+    if (items.length < 2) continue;
+    const flags = items.map((item) => checkedSet.has(entryKey(item)));
+    if (flags.some(Boolean) && !flags.every(Boolean)) {
+      toast("同一文件的已暂存与未暂存改动需一起勾选：" + path, "warning");
+      return { ok: false };
+    }
+  }
   // 提交路径：已暂存的重命名需要同时带上旧路径，--only 才能把删除一并写入提交。
   const paths = expandRenamePaths(
     repo,
     selected.length ? selected : uniquePaths(data.status.staged),
   );
-  // 暂存路径：只暂存工作区里仍有未暂存内容的勾选路径，避免对已暂存删除/重命名重复 add。
-  const stageTargets = selected.filter(
-    (path) =>
-      data.status.unstaged.some((entry) => entry.path === path) ||
-      data.status.untracked.some((entry) => entry.path === path),
-  );
+  // 暂存路径：只暂存被勾选的未暂存/未跟踪条目，避免把同路径里未勾选的内容一起 add。
+  const stageTargets = data.status.unstaged.concat(data.status.untracked)
+    .filter((entry) => checkedSet.has(entryKey(entry)))
+    .map((entry) => entry.path);
   if (!paths.length && !opts.allowEmpty && !opts.amend) {
     toast("没有可提交的更改", "error");
     return { ok: false };
@@ -549,6 +583,7 @@ async function ensureFileDiff(repo, entry, mode, force) {
   const cached = data.diffCache[key];
   if (cached && cached.loading) return cached;
   if (!force && cached && cached.generation === data.statusGeneration && Date.now() - cached.at < 3000) return cached;
+  const generationAtStart = data.statusGeneration;
   const result = {
     loading: true,
     error: null,
@@ -558,7 +593,7 @@ async function ensureFileDiff(repo, entry, mode, force) {
     entry,
     mode: diffMode,
     at: Date.now(),
-    generation: data.statusGeneration,
+    generation: generationAtStart,
   };
   data.diffCache[key] = result;
   const keys = Object.keys(data.diffCache);
@@ -572,10 +607,16 @@ async function ensureFileDiff(repo, entry, mode, force) {
   notify();
   try {
     if (entry.unmerged) {
-      const file = await readWorkspaceFile(joinPath(repo, entry.path), { maxBytes: 384 * 1024 });
+      const abs = joinPath(repo, entry.path);
+      const file = await readWorkspaceFile(abs, { maxBytes: 384 * 1024 });
+      // 文件存在却读不出来（被占用/无权限）时不能当作空文件：允许编辑会把整份冲突内容覆盖成空。
+      const readError =
+        !file && (await workspacePathExists(abs))
+          ? "无法读取该冲突文件（可能被其它程序占用或无权限），请先在外部程序中处理"
+          : "";
       result.preview = file
         ? { text: file.text, binary: file.binary, truncated: file.truncated, conflict: true }
-        : { text: "", binary: false, truncated: false, conflict: true };
+        : { text: "", binary: false, truncated: false, conflict: true, error: readError };
     } else if (entry.code === "?" || (entry.staged && entry.x === "A")) {
       // 已暂存的新文件必须读索引内容，工作区可能已被继续修改。
       const shown = entry.staged
@@ -583,7 +624,7 @@ async function ensureFileDiff(repo, entry, mode, force) {
         : null;
       if (shown && shown.code === 0) {
         result.text = shown.stdout;
-        result.truncated = shown.stdout.length >= GIT_MAX_OUTPUT - 64;
+        result.truncated = outputTruncated(shown.stdout);
         result.preview = {
           text: shown.stdout,
           binary: shown.stdout.indexOf("\u0000") >= 0,
@@ -617,7 +658,12 @@ async function ensureFileDiff(repo, entry, mode, force) {
     }
     result.loading = false;
     result.at = Date.now();
-    result.generation = data.statusGeneration;
+    // 请求期间状态已变化：这批内容属于旧代际，丢弃并立即按新代际重取，
+    // 否则依赖数组不会再次变化，界面会一直停在旧差异上。
+    if (generationAtStart !== data.statusGeneration) {
+      if (data.diffCache[key] === result) delete data.diffCache[key];
+      void ensureFileDiff(repo, entry, diffMode, true);
+    }
   } catch (error) {
     result.loading = false;
     result.error = safeError(error);
@@ -650,7 +696,7 @@ async function applyHunk(repo, file, hunk, action, selected) {
     const patchPath = joinPath(dir, "hunk-" + Date.now() + "-" + Math.random().toString(36).slice(2) + ".patch");
     await writeWorkspaceFile(patchPath, patch);
     try {
-      const args = ["apply", "--whitespace=nowarn"];
+      const args = ["apply", "--whitespace=nowarn", "--unidiff-zero"];
       if (action === "stage") args.push("--cached");
       if (action === "unstage") args.push("--cached", "--reverse");
       if (action === "discard") args.push("--reverse");
@@ -697,17 +743,23 @@ function subsetHunk(hunk, selected, reverse) {
   let newCount = 0;
   let changed = 0;
   let lastKept = false;
+  let lastIntact = false;
   for (let index = 0; index < hunk.lines.length; index += 1) {
     const line = hunk.lines[index];
     if (line.kind === "note") {
-      if (lastKept) lines.push(line);
+      // note（\ No newline）描述紧邻的前一行；前一行被丢弃或改成上下文时，
+      // 补丁会自相矛盾（git apply 会静默把两行合并），整块拒绝交给 UI 提示。
+      if (!lastKept || !lastIntact) return null;
+      lines.push(line);
       continue;
     }
     let kind = line.kind;
-    if ((kind === "add" || kind === "del") && !selected.has(index)) {
+    const intact = !((kind === "add" || kind === "del") && !selected.has(index));
+    if (!intact) {
       const keepAsContext = reverse ? kind === "add" : kind === "del";
       if (!keepAsContext) {
         lastKept = false;
+        lastIntact = false;
         continue;
       }
       kind = "ctx";
@@ -717,6 +769,7 @@ function subsetHunk(hunk, selected, reverse) {
     if (kind === "ctx" || kind === "add") newCount += 1;
     lines.push(kind === line.kind ? line : Object.assign({}, line, { kind }));
     lastKept = kind !== "meta";
+    lastIntact = intact && kind === line.kind;
   }
   if (!changed) return null;
   const header =
@@ -909,7 +962,12 @@ async function cloneRepository() {
     confirmLabel: "克隆",
   });
   if (!values || !values.url || !values.dest) return { ok: false };
-  const dest = normalizePath(values.dest);
+  const rawDest = String(values.dest).trim();
+  const dest = isAbsolutePath(rawDest) ? normalizePath(rawDest) : state.workspacePath ? joinPath(state.workspacePath, rawDest) : "";
+  if (!dest) {
+    toast("请填写绝对路径，或先打开一个工作区", "error");
+    return { ok: false };
+  }
   return enqueue(() =>
     withBusy("克隆仓库", async () => {
       try {
@@ -949,7 +1007,16 @@ async function addRepoManually() {
     confirmLabel: "添加",
   });
   if (!values || !values.path) return { ok: false };
-  const path = normalizePath(values.path);
+  const rawPath = String(values.path).trim();
+  const path = isAbsolutePath(rawPath)
+    ? normalizePath(rawPath)
+    : state.workspacePath
+      ? joinPath(state.workspacePath, rawPath)
+      : "";
+  if (!path) {
+    toast("请填写绝对路径，或先打开一个工作区", "error");
+    return { ok: false };
+  }
   const root = await resolveRepoRoot(path);
   if (!root) {
     toast("该路径不是 Git 仓库", "error");
@@ -1033,15 +1100,17 @@ async function loadBlame(repo, path, start) {
       throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
     }
     const lines = parseBlamePorcelain(res.stdout);
-    const truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64 || (res.stdout.length > 0 && !res.stdout.endsWith("\n"));
+    const truncated = outputTruncated(res.stdout) || (res.stdout.length > 0 && !res.stdout.endsWith("\n"));
     let maxLine = 0;
     for (let i = 0; i < lines.length; i += 1) if (lines[i]) maxLine = i;
     if (!state.blame || state.blame.token !== token) return;
     state.blame = Object.assign({}, state.blame, {
       lines,
       truncated,
-      // 本段没填满，说明已经到文件末尾，禁用“下一段”。
-      exhausted: maxLine < rangeEnd,
+      // 本段没填满，说明已经到文件末尾；输出被截断时不能据此判定，
+      // 且把 end 收窄到最后解析到的行，下一页不会跳过被截掉的尾部。
+      end: truncated && maxLine ? maxLine : rangeEnd,
+      exhausted: !truncated && maxLine < rangeEnd,
       loading: false,
       error: null,
     });
@@ -1064,6 +1133,9 @@ async function loadBlame(repo, path, start) {
 
 async function shiftBlame(delta) {
   if (!state.blame) return;
-  const next = Math.max(1, state.blame.start + delta);
+  // 输出被截断时 end 是实际解析到的最后一行，向前翻页必须接上它，否则会跳过被截掉的尾部。
+  const next = delta > 0 && state.blame.truncated
+    ? Math.max(1, (Number(state.blame.end) || 0) + 1)
+    : Math.max(1, state.blame.start + delta);
   await loadBlame(state.blame.repo, state.blame.path, next);
 }
