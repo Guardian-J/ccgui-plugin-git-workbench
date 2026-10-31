@@ -2746,10 +2746,21 @@ function computeStatusSignature(status) {
 }
 
 /**
- * git log 用 %x1e 分隔记录；输出触达 64KB 上限时最后一条可能被切断。
- * 返回 {text, truncated}，text 只保留完整的记录。
+ * 普通行记录输出触达 64KB 上限时，最后一行可能被切断：丢弃最后一个换行之后的残片。
+ * 仅按长度判定，不要求末尾换行——否则正常输出会被误裁。
  */
 function clipTruncatedLines(stdout) {
+  const text = String(stdout || "");
+  if (text.length < GIT_MAX_OUTPUT - 64) return { text, truncated: false };
+  const cut = text.lastIndexOf("\n");
+  return { text: cut >= 0 ? text.slice(0, cut) : "", truncated: true };
+}
+
+/**
+ * git log 用 %x1e 分隔记录；输出触达上限或末尾缺分隔符时最后一条可能被切断。
+ * 与 clipTruncatedLines 分开：普通命令（for-each-ref 等）不以 %x1e 结尾。
+ */
+function clipLogRecords(stdout) {
   const text = String(stdout || "");
   const nearLimit = text.length >= GIT_MAX_OUTPUT - 64;
   const complete = !text.length || text.endsWith("\x1e");
@@ -2969,7 +2980,7 @@ async function loadLog(path, reset, options) {
         notify();
         return;
       }
-      const clipped = clipTruncatedLines(res.stdout);
+      const clipped = clipLogRecords(res.stdout);
       const commits = parseLog(clipped.text);
       if (reset) {
         view.commits = commits;
