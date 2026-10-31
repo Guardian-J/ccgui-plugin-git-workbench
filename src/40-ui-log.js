@@ -781,7 +781,7 @@ function CommitDetail(props) {
           ? h("div", { className: "cg-notice" }, "正在加载差异…")
           : file.error
             ? h(Banner, { tone: "error" }, file.error)
-            : h(ReadonlyDiff, { files: file.files, path: file.path, fallback: file.text })
+            : h(ReadonlyDiff, { key: selected.hash + ":" + file.path, files: file.files, path: file.path, fallback: file.text })
         : h("div", { className: "cg-notice" }, "选择上方文件查看该提交中的差异"),
     ),
   );
@@ -924,7 +924,7 @@ function DiffDialog() {
           ? h("div", { className: "cg-notice" }, "正在加载差异…")
           : dialog.error
             ? h(Banner, { tone: "error" }, dialog.error)
-            : h(ReadonlyDiff, { files: dialog.files, path: dialog.path, fallback: dialog.text }),
+            : h(ReadonlyDiff, { key: dialog.id, files: dialog.files, path: dialog.path, fallback: dialog.text }),
       ),
     ),
   );

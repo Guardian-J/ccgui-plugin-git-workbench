@@ -360,7 +360,7 @@ function StashesTab(props) {
                 h(IconBtn, { name: "refresh", label: "刷新", onClick: () => loadStashDiff(repo, diff.selector) }),
               ),
               diff.error ? h(Banner, { tone: "error" }, diff.error) : null,
-              h(ReadonlyDiff, { files: diff.files, fallback: diff.text }),
+              h(ReadonlyDiff, { key: diff.selector, files: diff.files, fallback: diff.text }),
             )
           : h(Empty, { icon: "stash", title: "选择一条贮藏查看内容" }),
       ),
