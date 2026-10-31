@@ -708,7 +708,7 @@ function SettingsTab(props) {
 function SettingsForm(props) {
   const h = appCtx.react.createElement;
   const s = useStoreSnapshot();
-  const { useState } = appCtx.react;
+  const { useEffect, useState } = appCtx.react;
   const settings = s.settings;
   const data = props.repo ? ensureRepoData(props.repo) : null;
   const [exclude, setExclude] = useState(settings.scanExclude);
@@ -716,6 +716,16 @@ function SettingsForm(props) {
   const [interval, setIntervalValue] = useState(String(settings.refreshInterval));
   const [pageSize, setPageSize] = useState(String(settings.logPageSize));
   const [context, setContext] = useState(String(settings.diffContext));
+  // 设置从别处变更（重置、宿主同步）时同步本地输入，避免输入框停在旧值。
+  useEffect(() => { setExclude(settings.scanExclude); }, [settings.scanExclude]);
+  useEffect(() => { setDepth(String(settings.scanDepth)); }, [settings.scanDepth]);
+  useEffect(() => { setIntervalValue(String(settings.refreshInterval)); }, [settings.refreshInterval]);
+  useEffect(() => { setPageSize(String(settings.logPageSize)); }, [settings.logPageSize]);
+  useEffect(() => { setContext(String(settings.diffContext)); }, [settings.diffContext]);
+  // 数值输入在 Enter 时提交（失焦触发 onBlur 的钳制与保存），不必再点别处。
+  const blurOnEnter = (event) => {
+    if (event.key === "Enter") event.currentTarget.blur();
+  };
   const save = (patch) => {
     void saveSettings(patch);
   };
@@ -762,6 +772,7 @@ function SettingsForm(props) {
         max: 20,
         value: depth,
         onChange: (event) => setDepth(event.target.value),
+        onKeyDown: blurOnEnter,
         onBlur: () => {
           const clamped = Math.max(1, Math.min(20, Number(depth) || 2));
           setDepth(String(clamped));
@@ -806,6 +817,7 @@ function SettingsForm(props) {
         max: 300,
         value: interval,
         onChange: (event) => setIntervalValue(event.target.value),
+        onKeyDown: blurOnEnter,
         onBlur: () => {
           const clamped = Math.max(3, Math.min(300, Number(interval) || 8));
           setIntervalValue(String(clamped));
@@ -820,6 +832,7 @@ function SettingsForm(props) {
         max: 200,
         value: pageSize,
         onChange: (event) => setPageSize(event.target.value),
+        onKeyDown: blurOnEnter,
         onBlur: () => {
           const clamped = Math.max(20, Math.min(200, Number(pageSize) || 100));
           setPageSize(String(clamped));
@@ -834,6 +847,7 @@ function SettingsForm(props) {
         max: 50,
         value: context,
         onChange: (event) => setContext(event.target.value),
+        onKeyDown: blurOnEnter,
         onBlur: () => {
           const clamped = Math.max(0, Math.min(50, Number.isFinite(Number(context)) ? Number(context) : 3));
           setContext(String(clamped));

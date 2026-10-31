@@ -575,7 +575,16 @@ function diffCacheKey(entry, mode) {
   return mode + "::" + (state.ignoreWhitespace ? "w" : "s") + "::" + context + "::" + entry.path;
 }
 
-async function ensureFileDiff(repo, entry, mode, force) {
+/** 静默刷新时判断差异内容是否真的变化；未变化就复用旧对象，避免重置区块选择。 */
+function diffContentUnchanged(previous, next) {
+  if (!previous || !next || previous.error || next.error) return false;
+  if (previous.text !== next.text) return false;
+  const a = previous.preview || {};
+  const b = next.preview || {};
+  return a.text === b.text && a.binary === b.binary && a.truncated === b.truncated && a.conflict === b.conflict;
+}
+
+async function ensureFileDiff(repo, entry, mode, force, silent) {
   const data = ensureRepoData(repo);
   const diffMode = mode || state.diffMode || "head";
   if (!entry) return null;
@@ -583,9 +592,11 @@ async function ensureFileDiff(repo, entry, mode, force) {
   const cached = data.diffCache[key];
   if (cached && cached.loading) return cached;
   if (!force && cached && cached.generation === data.statusGeneration && Date.now() - cached.at < 3000) return cached;
+  // 静默刷新就地比对内容：不显示 loading、不替换缓存对象，内容没变时界面完全不重渲染。
+  const silentRefresh = Boolean(silent && cached && !cached.loading);
   const generationAtStart = data.statusGeneration;
   const result = {
-    loading: true,
+    loading: !silentRefresh,
     error: null,
     text: "",
     files: [],
@@ -595,16 +606,18 @@ async function ensureFileDiff(repo, entry, mode, force) {
     at: Date.now(),
     generation: generationAtStart,
   };
-  data.diffCache[key] = result;
-  const keys = Object.keys(data.diffCache);
-  if (keys.length > 80) {
-    const evict = keys
-      .filter((item) => item !== key && !data.diffCache[item].loading)
-      .sort((a, b) => (data.diffCache[a].at || 0) - (data.diffCache[b].at || 0))
-      .slice(0, keys.length - 80);
-    for (const item of evict) delete data.diffCache[item];
+  if (!silentRefresh) {
+    data.diffCache[key] = result;
+    const keys = Object.keys(data.diffCache);
+    if (keys.length > 80) {
+      const evict = keys
+        .filter((item) => item !== key && !data.diffCache[item].loading)
+        .sort((a, b) => (data.diffCache[a].at || 0) - (data.diffCache[b].at || 0))
+        .slice(0, keys.length - 80);
+      for (const item of evict) delete data.diffCache[item];
+    }
+    notify();
   }
-  notify();
   try {
     if (entry.unmerged) {
       const abs = joinPath(repo, entry.path);
@@ -653,14 +666,15 @@ async function ensureFileDiff(repo, entry, mode, force) {
         throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
       }
       result.text = res.stdout;
-      result.truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64 || (res.stdout.length > 0 && !res.stdout.endsWith("\n"));
+      result.truncated = outputTruncated(res.stdout) || (res.stdout.length > 0 && !res.stdout.endsWith("\n"));
       result.files = parseUnifiedDiff(res.stdout);
     }
     result.loading = false;
     result.at = Date.now();
     // 请求期间状态已变化：这批内容属于旧代际，丢弃并立即按新代际重取，
     // 否则依赖数组不会再次变化，界面会一直停在旧差异上。
-    if (generationAtStart !== data.statusGeneration) {
+    // 静默刷新不写缓存也不递归，交给状态变化后的正常重取或下一轮轮询。
+    if (!silentRefresh && generationAtStart !== data.statusGeneration) {
       if (data.diffCache[key] === result) delete data.diffCache[key];
       void ensureFileDiff(repo, entry, diffMode, true);
     }
@@ -668,9 +682,31 @@ async function ensureFileDiff(repo, entry, mode, force) {
     result.loading = false;
     result.error = safeError(error);
     result.at = Date.now();
+    // 静默刷新失败时保留旧内容，不打断正在查看的差异。
+    if (silentRefresh) return cached;
+  }
+  if (silentRefresh) {
+    if (diffContentUnchanged(cached, result)) {
+      cached.at = Date.now();
+      cached.generation = generationAtStart;
+      return cached;
+    }
+    data.diffCache[key] = result;
   }
   notify();
   return result;
+}
+
+/** 轮询发现状态签名未变时仍静默重取当前选中文件的差异：外部编辑同一路径不会改变签名。 */
+function refreshSelectedDiff(repo) {
+  const selection = state.selectedFile;
+  if (!selection || pathKey(selection.repo) !== pathKey(repo)) return;
+  const data = ensureRepoData(repo);
+  const entry = data.status.entries.find(
+    (item) => item.path === selection.path && Boolean(item.staged) === Boolean(selection.staged),
+  );
+  if (!entry) return;
+  void ensureFileDiff(repo, entry, entry.staged ? "staged" : "worktree", true, true).catch(() => undefined);
 }
 
 /**

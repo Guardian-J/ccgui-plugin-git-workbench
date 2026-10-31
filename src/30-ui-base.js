@@ -447,6 +447,28 @@ const ICONS = {
   dot: ["M12 12h.01"],
 };
 
+/**
+ * 大列表行组件用浅比较 memo：父级状态变化时不再整表重建。
+ * 这些行只依赖 props，不会跳过自身 store 订阅触发的更新。
+ */
+let listRowsMemoized = false;
+
+function memoComponent(component) {
+  const memo = appCtx && appCtx.react && appCtx.react.memo;
+  if (!memo || !component) return component;
+  return memo(component);
+}
+
+function memoizeListRows() {
+  if (listRowsMemoized) return;
+  if (!appCtx || !appCtx.react.memo) return;
+  listRowsMemoized = true;
+  CommitRow = memoComponent(CommitRow);
+  DiffLine = memoComponent(DiffLine);
+  SplitDiffRow = memoComponent(SplitDiffRow);
+  FileRow = memoComponent(FileRow);
+}
+
 function Icon(props) {
   const name = props.name || "git";
   const paths = ICONS[name] || ICONS.dot;

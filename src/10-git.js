@@ -437,7 +437,7 @@ async function writeWorkspaceFile(path, text) {
     for (let i = 0; i < chunks.length; i += 1) await writeChunk(tmp, chunks[i], i > 0);
     const move = windows
       ? "Move-Item -LiteralPath $env:CCGIT_TMP -Destination $env:CCGIT_FILE -Force"
-      : 'mv -f "$CCGIT_TMP" "$CCGIT_FILE"';
+      : 'if [ -e "$CCGIT_FILE" ]; then p=$(stat -c %a "$CCGIT_FILE" 2>/dev/null || stat -f %Lp "$CCGIT_FILE" 2>/dev/null); [ -n "$p" ] && chmod "$p" "$CCGIT_TMP"; fi; mv -f "$CCGIT_TMP" "$CCGIT_FILE"';
     await runShell(move, { CCGIT_TMP: toSlash(tmp), CCGIT_FILE: toSlash(path) }, {
       description: "替换文件",
       timeoutMs: 30000,

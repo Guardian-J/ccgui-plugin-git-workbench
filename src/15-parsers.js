@@ -401,6 +401,21 @@ function parseWorktrees(raw) {
   return out;
 }
 
+/**
+ * git submodule status 的括号描述。路径本身也可能带空格和括号（如 `lib (old)`），
+ * 只有括号内容符合 describe 形态时才当作描述，否则整段仍是路径。
+ */
+function looksLikeSubmoduleDescribe(value) {
+  const text = String(value || "").trim();
+  if (!text || /[\s()]/.test(text)) return false;
+  return (
+    /^[0-9a-f]{7,}(-dirty)?$/.test(text) ||
+    /^.+-[0-9]+-g[0-9a-f]+(-dirty)?$/.test(text) ||
+    /^(heads|tags|remotes)\/.+$/.test(text) ||
+    /^[A-Za-z0-9._\/+-]+$/.test(text)
+  );
+}
+
 function parseSubmodules(raw) {
   const out = [];
   for (const line of splitLines(raw)) {
@@ -409,8 +424,8 @@ function parseSubmodules(raw) {
     if (!m) continue;
     let rest = m[3];
     let describe = "";
-    const noted = rest.match(/^(.*) \(([^)]*)\)$/);
-    if (noted) {
+    const noted = rest.match(/^(.*) \(([^()]*)\)$/);
+    if (noted && looksLikeSubmoduleDescribe(noted[2])) {
       rest = noted[1];
       describe = noted[2];
     }

@@ -314,6 +314,7 @@ export default function activate(ctx) {
   setAppContext(ctx);
   disposed = false;
   pollRefs = 0;
+  memoizeListRows();
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;

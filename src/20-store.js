@@ -22,6 +22,7 @@ const state = {
   activeTab: "changes",
   workbenchOpen: false,
   repoData: {},
+  repoDataOrder: [],
   checkedByRepo: {},
   selectedFile: null, // {repo, path, staged}
   diffMode: "head", // head | staged | worktree
@@ -107,6 +108,11 @@ function activeRepoData() {
   return state.activeRepo ? ensureRepoData(state.activeRepo) : null;
 }
 
+/** 常驻内存的仓库数据上限；超出后淘汰最久未访问、且不属于当前工作区的仓库。 */
+const REPO_DATA_MAX = 24;
+/** 持久化的仓库发现缓存上限；切换过多工作区时保留最近使用的若干个。 */
+const REPO_CACHE_MAX_WORKSPACES = 8;
+
 function ensureRepoData(path) {
   const key = normalizePath(path);
   if (!state.repoData[key]) {
@@ -142,7 +148,37 @@ function ensureRepoData(path) {
       diffCache: {},
     };
   }
+  touchRepoData(key);
   return state.repoData[key];
+}
+
+function touchRepoData(key) {
+  const order = state.repoDataOrder;
+  if (order[order.length - 1] === key) return;
+  const at = order.indexOf(key);
+  if (at >= 0) order.splice(at, 1);
+  order.push(key);
+  if (order.length <= REPO_DATA_MAX) return;
+  const active = state.activeRepo ? pathKey(state.activeRepo) : "";
+  const live = new Set((state.repos || []).map((item) => pathKey(item.path)));
+  for (let index = 0; index < order.length && order.length > REPO_DATA_MAX; ) {
+    const old = order[index];
+    if (old === key || old === active || live.has(old)) {
+      index += 1;
+      continue;
+    }
+    delete state.repoData[old];
+    delete state.checkedByRepo[old];
+    order.splice(index, 1);
+  }
+}
+
+/** 仓库发现缓存只保留最近使用的若干个工作区，避免持久化体积无限增长。 */
+function trimRepoCache() {
+  const keys = Object.keys(state.repoCache);
+  if (keys.length <= REPO_CACHE_MAX_WORKSPACES) return;
+  keys.sort((a, b) => (state.repoCache[b].at || 0) - (state.repoCache[a].at || 0));
+  for (const key of keys.slice(REPO_CACHE_MAX_WORKSPACES)) delete state.repoCache[key];
 }
 
 function setState(patch) {
@@ -188,6 +224,7 @@ async function loadSettings() {
         if (now - (entry.at || 0) > REPO_CACHE_MAX_AGE_MS) continue;
         state.repoCache[key] = entry;
       }
+      trimRepoCache();
     }
   } catch (error) {
     // ignore
@@ -480,6 +517,7 @@ async function saveRepoCache(ws, repos) {
   state.repoCache = Object.assign({}, state.repoCache, {
     [key]: { at: Date.now(), repos: repos.slice() },
   });
+  trimRepoCache();
   try {
     await appCtx.storage.set("repoCache", state.repoCache);
   } catch (error) {
@@ -708,12 +746,14 @@ async function loadRepoStatus(path, force) {
       }
       notify();
       void loadOperations(key).catch(() => undefined);
+      return changed;
     } catch (error) {
       if (invalidate) data.statusInvalidate = true;
-      if (data.statusRequest !== request) return;
+      if (data.statusRequest !== request) return false;
       data.loading.status = false;
       data.error = safeError(error);
       notify();
+      return false;
     } finally {
       if (statusInflight.get(key) === task) statusInflight.delete(key);
     }
@@ -1074,7 +1114,10 @@ async function pollWorkspaceOnce() {
   if (data.loading.status) return;
   if (Date.now() - (data.statusAt || 0) < 3000) return;
   // 直接重载完整 status：quick 快照无法发现同一路径的内容变化。
-  await loadRepoStatus(repo, true);
+  const changed = await loadRepoStatus(repo, true);
+  // 状态签名未变（外部反复编辑同一路径）时，status 不会推进代际，
+  // 这里静默重取选中文件的差异，内容真变了才替换，避免每轮轮询重置区块选择。
+  if (changed === false) refreshSelectedDiff(repo);
   // 非活动仓库的侧栏计数也需要跟上，但降低频率，避免每轮对全部仓库跑 status。
   const stale = state.repos.filter((item) => {
     if (pathKey(item.path) === pathKey(repo)) return false;

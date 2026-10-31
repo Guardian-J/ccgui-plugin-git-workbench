@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.8";
+const PLUGIN_VERSION = "0.2.9";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -895,7 +895,7 @@ async function writeWorkspaceFile(path, text) {
     for (let i = 0; i < chunks.length; i += 1) await writeChunk(tmp, chunks[i], i > 0);
     const move = windows
       ? "Move-Item -LiteralPath $env:CCGIT_TMP -Destination $env:CCGIT_FILE -Force"
-      : 'mv -f "$CCGIT_TMP" "$CCGIT_FILE"';
+      : 'if [ -e "$CCGIT_FILE" ]; then p=$(stat -c %a "$CCGIT_FILE" 2>/dev/null || stat -f %Lp "$CCGIT_FILE" 2>/dev/null); [ -n "$p" ] && chmod "$p" "$CCGIT_TMP"; fi; mv -f "$CCGIT_TMP" "$CCGIT_FILE"';
     await runShell(move, { CCGIT_TMP: toSlash(tmp), CCGIT_FILE: toSlash(path) }, {
       description: "替换文件",
       timeoutMs: 30000,
@@ -1706,6 +1706,21 @@ function parseWorktrees(raw) {
   return out;
 }
 
+/**
+ * git submodule status 的括号描述。路径本身也可能带空格和括号（如 `lib (old)`），
+ * 只有括号内容符合 describe 形态时才当作描述，否则整段仍是路径。
+ */
+function looksLikeSubmoduleDescribe(value) {
+  const text = String(value || "").trim();
+  if (!text || /[\s()]/.test(text)) return false;
+  return (
+    /^[0-9a-f]{7,}(-dirty)?$/.test(text) ||
+    /^.+-[0-9]+-g[0-9a-f]+(-dirty)?$/.test(text) ||
+    /^(heads|tags|remotes)\/.+$/.test(text) ||
+    /^[A-Za-z0-9._\/+-]+$/.test(text)
+  );
+}
+
 function parseSubmodules(raw) {
   const out = [];
   for (const line of splitLines(raw)) {
@@ -1714,8 +1729,8 @@ function parseSubmodules(raw) {
     if (!m) continue;
     let rest = m[3];
     let describe = "";
-    const noted = rest.match(/^(.*) \(([^)]*)\)$/);
-    if (noted) {
+    const noted = rest.match(/^(.*) \(([^()]*)\)$/);
+    if (noted && looksLikeSubmoduleDescribe(noted[2])) {
       rest = noted[1];
       describe = noted[2];
     }
@@ -2063,6 +2078,7 @@ const state = {
   activeTab: "changes",
   workbenchOpen: false,
   repoData: {},
+  repoDataOrder: [],
   checkedByRepo: {},
   selectedFile: null, // {repo, path, staged}
   diffMode: "head", // head | staged | worktree
@@ -2148,6 +2164,11 @@ function activeRepoData() {
   return state.activeRepo ? ensureRepoData(state.activeRepo) : null;
 }
 
+/** 常驻内存的仓库数据上限；超出后淘汰最久未访问、且不属于当前工作区的仓库。 */
+const REPO_DATA_MAX = 24;
+/** 持久化的仓库发现缓存上限；切换过多工作区时保留最近使用的若干个。 */
+const REPO_CACHE_MAX_WORKSPACES = 8;
+
 function ensureRepoData(path) {
   const key = normalizePath(path);
   if (!state.repoData[key]) {
@@ -2183,7 +2204,37 @@ function ensureRepoData(path) {
       diffCache: {},
     };
   }
+  touchRepoData(key);
   return state.repoData[key];
+}
+
+function touchRepoData(key) {
+  const order = state.repoDataOrder;
+  if (order[order.length - 1] === key) return;
+  const at = order.indexOf(key);
+  if (at >= 0) order.splice(at, 1);
+  order.push(key);
+  if (order.length <= REPO_DATA_MAX) return;
+  const active = state.activeRepo ? pathKey(state.activeRepo) : "";
+  const live = new Set((state.repos || []).map((item) => pathKey(item.path)));
+  for (let index = 0; index < order.length && order.length > REPO_DATA_MAX; ) {
+    const old = order[index];
+    if (old === key || old === active || live.has(old)) {
+      index += 1;
+      continue;
+    }
+    delete state.repoData[old];
+    delete state.checkedByRepo[old];
+    order.splice(index, 1);
+  }
+}
+
+/** 仓库发现缓存只保留最近使用的若干个工作区，避免持久化体积无限增长。 */
+function trimRepoCache() {
+  const keys = Object.keys(state.repoCache);
+  if (keys.length <= REPO_CACHE_MAX_WORKSPACES) return;
+  keys.sort((a, b) => (state.repoCache[b].at || 0) - (state.repoCache[a].at || 0));
+  for (const key of keys.slice(REPO_CACHE_MAX_WORKSPACES)) delete state.repoCache[key];
 }
 
 function setState(patch) {
@@ -2229,6 +2280,7 @@ async function loadSettings() {
         if (now - (entry.at || 0) > REPO_CACHE_MAX_AGE_MS) continue;
         state.repoCache[key] = entry;
       }
+      trimRepoCache();
     }
   } catch (error) {
     // ignore
@@ -2521,6 +2573,7 @@ async function saveRepoCache(ws, repos) {
   state.repoCache = Object.assign({}, state.repoCache, {
     [key]: { at: Date.now(), repos: repos.slice() },
   });
+  trimRepoCache();
   try {
     await appCtx.storage.set("repoCache", state.repoCache);
   } catch (error) {
@@ -2749,12 +2802,14 @@ async function loadRepoStatus(path, force) {
       }
       notify();
       void loadOperations(key).catch(() => undefined);
+      return changed;
     } catch (error) {
       if (invalidate) data.statusInvalidate = true;
-      if (data.statusRequest !== request) return;
+      if (data.statusRequest !== request) return false;
       data.loading.status = false;
       data.error = safeError(error);
       notify();
+      return false;
     } finally {
       if (statusInflight.get(key) === task) statusInflight.delete(key);
     }
@@ -3115,7 +3170,10 @@ async function pollWorkspaceOnce() {
   if (data.loading.status) return;
   if (Date.now() - (data.statusAt || 0) < 3000) return;
   // 直接重载完整 status：quick 快照无法发现同一路径的内容变化。
-  await loadRepoStatus(repo, true);
+  const changed = await loadRepoStatus(repo, true);
+  // 状态签名未变（外部反复编辑同一路径）时，status 不会推进代际，
+  // 这里静默重取选中文件的差异，内容真变了才替换，避免每轮轮询重置区块选择。
+  if (changed === false) refreshSelectedDiff(repo);
   // 非活动仓库的侧栏计数也需要跟上，但降低频率，避免每轮对全部仓库跑 status。
   const stale = state.repos.filter((item) => {
     if (pathKey(item.path) === pathKey(repo)) return false;
@@ -3728,7 +3786,16 @@ function diffCacheKey(entry, mode) {
   return mode + "::" + (state.ignoreWhitespace ? "w" : "s") + "::" + context + "::" + entry.path;
 }
 
-async function ensureFileDiff(repo, entry, mode, force) {
+/** 静默刷新时判断差异内容是否真的变化；未变化就复用旧对象，避免重置区块选择。 */
+function diffContentUnchanged(previous, next) {
+  if (!previous || !next || previous.error || next.error) return false;
+  if (previous.text !== next.text) return false;
+  const a = previous.preview || {};
+  const b = next.preview || {};
+  return a.text === b.text && a.binary === b.binary && a.truncated === b.truncated && a.conflict === b.conflict;
+}
+
+async function ensureFileDiff(repo, entry, mode, force, silent) {
   const data = ensureRepoData(repo);
   const diffMode = mode || state.diffMode || "head";
   if (!entry) return null;
@@ -3736,9 +3803,11 @@ async function ensureFileDiff(repo, entry, mode, force) {
   const cached = data.diffCache[key];
   if (cached && cached.loading) return cached;
   if (!force && cached && cached.generation === data.statusGeneration && Date.now() - cached.at < 3000) return cached;
+  // 静默刷新就地比对内容：不显示 loading、不替换缓存对象，内容没变时界面完全不重渲染。
+  const silentRefresh = Boolean(silent && cached && !cached.loading);
   const generationAtStart = data.statusGeneration;
   const result = {
-    loading: true,
+    loading: !silentRefresh,
     error: null,
     text: "",
     files: [],
@@ -3748,16 +3817,18 @@ async function ensureFileDiff(repo, entry, mode, force) {
     at: Date.now(),
     generation: generationAtStart,
   };
-  data.diffCache[key] = result;
-  const keys = Object.keys(data.diffCache);
-  if (keys.length > 80) {
-    const evict = keys
-      .filter((item) => item !== key && !data.diffCache[item].loading)
-      .sort((a, b) => (data.diffCache[a].at || 0) - (data.diffCache[b].at || 0))
-      .slice(0, keys.length - 80);
-    for (const item of evict) delete data.diffCache[item];
+  if (!silentRefresh) {
+    data.diffCache[key] = result;
+    const keys = Object.keys(data.diffCache);
+    if (keys.length > 80) {
+      const evict = keys
+        .filter((item) => item !== key && !data.diffCache[item].loading)
+        .sort((a, b) => (data.diffCache[a].at || 0) - (data.diffCache[b].at || 0))
+        .slice(0, keys.length - 80);
+      for (const item of evict) delete data.diffCache[item];
+    }
+    notify();
   }
-  notify();
   try {
     if (entry.unmerged) {
       const abs = joinPath(repo, entry.path);
@@ -3806,14 +3877,15 @@ async function ensureFileDiff(repo, entry, mode, force) {
         throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
       }
       result.text = res.stdout;
-      result.truncated = res.stdout.length >= GIT_MAX_OUTPUT - 64 || (res.stdout.length > 0 && !res.stdout.endsWith("\n"));
+      result.truncated = outputTruncated(res.stdout) || (res.stdout.length > 0 && !res.stdout.endsWith("\n"));
       result.files = parseUnifiedDiff(res.stdout);
     }
     result.loading = false;
     result.at = Date.now();
     // 请求期间状态已变化：这批内容属于旧代际，丢弃并立即按新代际重取，
     // 否则依赖数组不会再次变化，界面会一直停在旧差异上。
-    if (generationAtStart !== data.statusGeneration) {
+    // 静默刷新不写缓存也不递归，交给状态变化后的正常重取或下一轮轮询。
+    if (!silentRefresh && generationAtStart !== data.statusGeneration) {
       if (data.diffCache[key] === result) delete data.diffCache[key];
       void ensureFileDiff(repo, entry, diffMode, true);
     }
@@ -3821,9 +3893,31 @@ async function ensureFileDiff(repo, entry, mode, force) {
     result.loading = false;
     result.error = safeError(error);
     result.at = Date.now();
+    // 静默刷新失败时保留旧内容，不打断正在查看的差异。
+    if (silentRefresh) return cached;
+  }
+  if (silentRefresh) {
+    if (diffContentUnchanged(cached, result)) {
+      cached.at = Date.now();
+      cached.generation = generationAtStart;
+      return cached;
+    }
+    data.diffCache[key] = result;
   }
   notify();
   return result;
+}
+
+/** 轮询发现状态签名未变时仍静默重取当前选中文件的差异：外部编辑同一路径不会改变签名。 */
+function refreshSelectedDiff(repo) {
+  const selection = state.selectedFile;
+  if (!selection || pathKey(selection.repo) !== pathKey(repo)) return;
+  const data = ensureRepoData(repo);
+  const entry = data.status.entries.find(
+    (item) => item.path === selection.path && Boolean(item.staged) === Boolean(selection.staged),
+  );
+  if (!entry) return;
+  void ensureFileDiff(repo, entry, entry.staged ? "staged" : "worktree", true, true).catch(() => undefined);
 }
 
 /**
@@ -6066,6 +6160,28 @@ const ICONS = {
   eye: ["M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"],
   dot: ["M12 12h.01"],
 };
+
+/**
+ * 大列表行组件用浅比较 memo：父级状态变化时不再整表重建。
+ * 这些行只依赖 props，不会跳过自身 store 订阅触发的更新。
+ */
+let listRowsMemoized = false;
+
+function memoComponent(component) {
+  const memo = appCtx && appCtx.react && appCtx.react.memo;
+  if (!memo || !component) return component;
+  return memo(component);
+}
+
+function memoizeListRows() {
+  if (listRowsMemoized) return;
+  if (!appCtx || !appCtx.react.memo) return;
+  listRowsMemoized = true;
+  CommitRow = memoComponent(CommitRow);
+  DiffLine = memoComponent(DiffLine);
+  SplitDiffRow = memoComponent(SplitDiffRow);
+  FileRow = memoComponent(FileRow);
+}
 
 function Icon(props) {
   const name = props.name || "git";
@@ -9827,7 +9943,7 @@ function SettingsTab(props) {
 function SettingsForm(props) {
   const h = appCtx.react.createElement;
   const s = useStoreSnapshot();
-  const { useState } = appCtx.react;
+  const { useEffect, useState } = appCtx.react;
   const settings = s.settings;
   const data = props.repo ? ensureRepoData(props.repo) : null;
   const [exclude, setExclude] = useState(settings.scanExclude);
@@ -9835,6 +9951,16 @@ function SettingsForm(props) {
   const [interval, setIntervalValue] = useState(String(settings.refreshInterval));
   const [pageSize, setPageSize] = useState(String(settings.logPageSize));
   const [context, setContext] = useState(String(settings.diffContext));
+  // 设置从别处变更（重置、宿主同步）时同步本地输入，避免输入框停在旧值。
+  useEffect(() => { setExclude(settings.scanExclude); }, [settings.scanExclude]);
+  useEffect(() => { setDepth(String(settings.scanDepth)); }, [settings.scanDepth]);
+  useEffect(() => { setIntervalValue(String(settings.refreshInterval)); }, [settings.refreshInterval]);
+  useEffect(() => { setPageSize(String(settings.logPageSize)); }, [settings.logPageSize]);
+  useEffect(() => { setContext(String(settings.diffContext)); }, [settings.diffContext]);
+  // 数值输入在 Enter 时提交（失焦触发 onBlur 的钳制与保存），不必再点别处。
+  const blurOnEnter = (event) => {
+    if (event.key === "Enter") event.currentTarget.blur();
+  };
   const save = (patch) => {
     void saveSettings(patch);
   };
@@ -9881,6 +10007,7 @@ function SettingsForm(props) {
         max: 20,
         value: depth,
         onChange: (event) => setDepth(event.target.value),
+        onKeyDown: blurOnEnter,
         onBlur: () => {
           const clamped = Math.max(1, Math.min(20, Number(depth) || 2));
           setDepth(String(clamped));
@@ -9925,6 +10052,7 @@ function SettingsForm(props) {
         max: 300,
         value: interval,
         onChange: (event) => setIntervalValue(event.target.value),
+        onKeyDown: blurOnEnter,
         onBlur: () => {
           const clamped = Math.max(3, Math.min(300, Number(interval) || 8));
           setIntervalValue(String(clamped));
@@ -9939,6 +10067,7 @@ function SettingsForm(props) {
         max: 200,
         value: pageSize,
         onChange: (event) => setPageSize(event.target.value),
+        onKeyDown: blurOnEnter,
         onBlur: () => {
           const clamped = Math.max(20, Math.min(200, Number(pageSize) || 100));
           setPageSize(String(clamped));
@@ -9953,6 +10082,7 @@ function SettingsForm(props) {
         max: 50,
         value: context,
         onChange: (event) => setContext(event.target.value),
+        onKeyDown: blurOnEnter,
         onBlur: () => {
           const clamped = Math.max(0, Math.min(50, Number.isFinite(Number(context)) ? Number(context) : 3));
           setContext(String(clamped));
@@ -10677,6 +10807,7 @@ export default function activate(ctx) {
   setAppContext(ctx);
   disposed = false;
   pollRefs = 0;
+  memoizeListRows();
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
