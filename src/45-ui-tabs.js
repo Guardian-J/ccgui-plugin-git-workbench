@@ -1087,13 +1087,6 @@ function CompactPanel(props) {
             { className: "cg-panel-card" },
             h(
               "div",
-              { className: "cg-panel-card-head" },
-              h(Icon, { name: "git", size: 11 }),
-              h("span", null, "仓库状态"),
-              h(Badge, null, quick ? quick.changed || 0 : countChanges(data)),
-            ),
-            h(
-              "div",
               { className: "cg-panel-summary" },
               h(
                 "div",
