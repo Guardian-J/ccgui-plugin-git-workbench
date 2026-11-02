@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.22";
+const PLUGIN_VERSION = "0.2.23";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -6193,13 +6193,14 @@ const PLUGIN_CSS = `
 .cg-panel-card{flex:none;margin:0.375rem 0.625rem 0.5rem;border:1px solid var(--cg-border);border-radius:0.625rem;background:var(--cg-surface-2);overflow:hidden}
 .cg-panel-card>.cg-panel-summary{padding:0.4375rem 0.75rem;border-bottom:0}
 .cg-panel-summary{display:flex;flex-direction:column;gap:0.125rem;padding:0.375rem 0.875rem;border-bottom:1px solid var(--cg-border);line-height:1.35}
-.cg-summary-row{display:flex;align-items:center;gap:0.75rem;min-width:0;font-size:0.6875rem;color:var(--color-text-tertiary)}
-.cg-summary-counts{flex-wrap:wrap;gap:0.125rem 0.875rem}
+.cg-summary-row{display:flex;align-items:center;gap:0.75rem;min-width:0;font-size:0.875rem;color:var(--color-text-tertiary)}
+.cg-summary-counts{flex-wrap:wrap;gap:0.125rem 0.875rem;font-size:0.6875rem}
 .cg-summary-item{display:inline-flex;align-items:center;gap:0.1875rem;white-space:nowrap}
-.cg-summary-item b{font-size:0.75rem;font-weight:650;color:var(--color-text-primary);font-variant-numeric:tabular-nums}
+.cg-summary-item b{font-size:0.875rem;font-weight:650;color:var(--color-text-primary);font-variant-numeric:tabular-nums}
+.cg-summary-counts .cg-summary-item b{font-size:0.6875rem}
 .cg-summary-branch{min-width:0;max-width:12rem;gap:0.25rem;color:var(--color-text-primary)}
-.cg-summary-branch b{max-width:9rem}
-.cg-summary-repo{margin-left:auto;min-width:0;max-width:10rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-secondary)}
+.cg-summary-branch b{max-width:9rem;font-size:0.9375rem;font-weight:700}
+.cg-summary-repo{margin-left:auto;min-width:0;max-width:10rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-secondary);font-size:0.6875rem;font-weight:400}
 .cg-panel-list{flex:1;overflow:auto;min-height:0;padding:0 0.625rem 0.75rem}
 /* 仓库区最多占面板高度 45%，不按行数写死高度。 */
 .cg-panel-list.cg-panel-repos{flex:0 1 auto;max-height:min(8.5rem,45%);overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
