@@ -476,6 +476,7 @@ function CommitRow(props) {
       h("span", { className: "cg-commit-subject" }, commit.subject || "(无提交信息)"),
     ),
     h("span", { className: "cg-commit-meta cg-commit-author", title: commit.author }, commit.author),
+    h("span", { className: "cg-commit-meta cg-commit-date", title: shortDate(commit.at) }, dateOnly(commit.at)),
     h("span", { className: "cg-commit-meta cg-commit-time", title: shortDate(commit.at) }, relativeTime(commit.at)),
     h("span", { className: "cg-commit-meta cg-commit-hash cg-mono" }, shortHash(commit.hash)),
   );

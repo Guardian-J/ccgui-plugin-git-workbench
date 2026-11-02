@@ -5,7 +5,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.16";
+const PLUGIN_VERSION = "0.2.17";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -188,6 +188,12 @@ function shortDate(epochSeconds) {
     ":" +
     pad(d.getMinutes())
   );
+}
+
+/** 只保留日期部分（提交图日期列）。 */
+function dateOnly(epochSeconds) {
+  const text = shortDate(epochSeconds);
+  return text ? text.slice(0, 10) : "";
 }
 
 function relativeTime(epochSeconds) {

@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.16";
+const PLUGIN_VERSION = "0.2.17";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -193,6 +193,12 @@ function shortDate(epochSeconds) {
     ":" +
     pad(d.getMinutes())
   );
+}
+
+/** 只保留日期部分（提交图日期列）。 */
+function dateOnly(epochSeconds) {
+  const text = shortDate(epochSeconds);
+  return text ? text.slice(0, 10) : "";
 }
 
 function relativeTime(epochSeconds) {
@@ -6048,6 +6054,7 @@ const PLUGIN_CSS = `
 .cg-commit-subject{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.7813rem}
 .cg-commit-meta{flex:none;color:var(--color-text-tertiary);font-size:0.6875rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cg-commit-author{width:6rem}
+.cg-commit-date{width:4.5rem;text-align:right;font-variant-numeric:tabular-nums}
 .cg-commit-time{width:4.5rem;text-align:right}
 .cg-commit-hash{width:3.875rem;text-align:right}
 @container (max-width:35rem){.cg-commit-author{display:none}}
@@ -8783,6 +8790,7 @@ function CommitRow(props) {
       h("span", { className: "cg-commit-subject" }, commit.subject || "(无提交信息)"),
     ),
     h("span", { className: "cg-commit-meta cg-commit-author", title: commit.author }, commit.author),
+    h("span", { className: "cg-commit-meta cg-commit-date", title: shortDate(commit.at) }, dateOnly(commit.at)),
     h("span", { className: "cg-commit-meta cg-commit-time", title: shortDate(commit.at) }, relativeTime(commit.at)),
     h("span", { className: "cg-commit-meta cg-commit-hash cg-mono" }, shortHash(commit.hash)),
   );

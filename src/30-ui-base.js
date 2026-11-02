@@ -266,6 +266,7 @@ const PLUGIN_CSS = `
 .cg-commit-subject{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.7813rem}
 .cg-commit-meta{flex:none;color:var(--color-text-tertiary);font-size:0.6875rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cg-commit-author{width:6rem}
+.cg-commit-date{width:4.5rem;text-align:right;font-variant-numeric:tabular-nums}
 .cg-commit-time{width:4.5rem;text-align:right}
 .cg-commit-hash{width:3.875rem;text-align:right}
 @container (max-width:35rem){.cg-commit-author{display:none}}
