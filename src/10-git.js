@@ -809,6 +809,33 @@ async function discoverRepos(workspacePath, settings, options) {
   return { repos, errors, targets };
 }
 
+/** 未跟踪条目按「排除目录」名单过滤：依赖、构建产物与编辑器缓存不应计入变更。
+ *  只作用于未跟踪（`?`），已跟踪文件的修改（未暂存）保持原样。 */
+function pruneExcludedUntracked(status, settings) {
+  if (!status || !Array.isArray(status.untracked) || !status.untracked.length) return status;
+  const excludes = normalizeExcludes(settings && settings.scanExclude);
+  if (!excludes.length) return status;
+  const skip = new Set(excludes.map((item) => item.toLowerCase()));
+  // entries 持有与 untracked 相同的条目引用，必须一起过滤：
+  // computeStatusSignature 只看 entries，不同步会导致内容变化被判为「未变」而沿用旧数据。
+  const dropped = new Set();
+  const kept = status.untracked.filter((entry) => {
+    const segments = String(entry.path || "").toLowerCase().split("/");
+    if (segments.some((segment) => skip.has(segment))) {
+      dropped.add(entry);
+      return false;
+    }
+    return true;
+  });
+  if (!dropped.size) return status;
+  return Object.assign({}, status, {
+    untracked: kept,
+    entries: Array.isArray(status.entries)
+      ? status.entries.filter((entry) => !dropped.has(entry))
+      : status.entries,
+  });
+}
+
 /** 快速摘要：分支/上游/变更数量，用于仓库列表与状态栏。 */
 async function loadQuickStatus(repoPath) {
   let res = await runGit(repoPath, ["-c", "status.aheadBehind=true", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"], {
@@ -824,7 +851,7 @@ async function loadQuickStatus(repoPath) {
   if (res.code !== 0) {
     return { error: maskSecrets((res.stderr || res.stdout || "git status 失败").trim()) };
   }
-  const parsed = parseStatusPorcelain(res.stdout, res.stderr, gitVersion);
+  const parsed = pruneExcludedUntracked(parseStatusPorcelain(res.stdout, res.stderr, gitVersion), state.settings);
   return {
     branch: parsed.branch,
     changed: uniquePaths(

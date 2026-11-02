@@ -587,7 +587,7 @@ function SubmodulesTab(props) {
                   "div",
                   { className: "cg-list-title" },
                   h("b", null, item.path),
-                  h(Badge, { tone: item.tone === "conflict" ? "conflict" : item.tone === "dirty" ? "mod" : item.tone === "missing" ? "del" : "neutral" }, item.flag.trim() || "正常"),
+                  h(Badge, { tone: item.tone === "conflict" ? "conflict" : item.tone === "dirty" ? "mod" : item.tone === "missing" ? "del" : "neutral" }, item.tone === "unknown" ? "未登记" : item.flag.trim() || "正常"),
                   h("span", { className: "cg-mono cg-muted cg-mini" }, shortHash(item.hash)),
                 ),
                 h("div", { className: "cg-list-sub" }, item.describe || ""),
@@ -779,7 +779,7 @@ function SettingsForm(props) {
           save({ scanDepth: clamped });
         },
       }),
-      h("label", null, "排除目录"),
+      h("label", { title: "仓库扫描时跳过这些目录；未跟踪列表也会过滤同名目录（已跟踪文件的修改不受影响）" }, "排除目录"),
       h("textarea", {
         className: "cg-textarea",
         rows: 3,
@@ -1088,7 +1088,8 @@ function CompactPanel(props) {
             h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "分支"), h("b", { className: "cg-ellipsis", title: branch.head }, branch.detached ? "游离 HEAD" : branch.head || "(无)")),
             h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "变更文件"), h("b", null, quick ? quick.changed || 0 : countChanges(data))),
             h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "暂存区"), h("b", null, quick ? quick.staged || 0 : data.status.staged.length)),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "未暂存"), h("b", null, quick ? (quick.unstaged || 0) + (quick.untracked || 0) : data.status.unstaged.length + data.status.untracked.length)),
+            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "未暂存"), h("b", null, quick ? quick.unstaged || 0 : data.status.unstaged.length)),
+            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "未跟踪"), h("b", null, quick ? quick.untracked || 0 : data.status.untracked.length)),
             h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "领先/落后"), h("b", null, "↑" + (branch.ahead || 0) + " ↓" + (branch.behind || 0))),
             h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "仓库"), h("b", { className: "cg-ellipsis", title: repo }, repoDisplayName(repo))),
           ),
@@ -1103,8 +1104,12 @@ function CompactPanel(props) {
           Object.keys(data.detailsErrors || {}).length || data.refsTruncated
             ? h(
                 "div",
-                { className: "cg-notice", style: { margin: "0 12px 8px" } },
-                Object.keys(data.detailsErrors || {}).length ? Object.keys(data.detailsErrors).length + " 项引用读取失败" : "",
+                {
+                  className: "cg-notice",
+                  style: { margin: "0 12px 8px" },
+                  title: detailErrorSummary(data.detailsErrors),
+                },
+                Object.keys(data.detailsErrors || {}).length ? Object.keys(data.detailsErrors).length + " 项仓库信息读取失败" : "",
                 data.refsTruncated ? "引用列表已截断（超过 64 KiB）" : "",
               )
             : null,

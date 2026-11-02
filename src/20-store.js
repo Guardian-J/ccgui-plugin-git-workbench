@@ -246,6 +246,18 @@ async function saveSettings(patch) {
   if (patch && Object.prototype.hasOwnProperty.call(patch, "skipHooks")) state.commitSkipHooks = Boolean(patch.skipHooks);
   if (patch && Object.prototype.hasOwnProperty.call(patch, "noGpgSign")) state.commitNoGpg = Boolean(patch.noGpgSign);
   notify();
+  if (patch && Object.prototype.hasOwnProperty.call(patch, "scanExclude")) {
+    // 排除名单参与未跟踪过滤，改变后立即重载当前工作区仓库，避免旧列表残留。
+    // 仓库根可能在工作区之上（工作区是上级仓库的子目录），两个方向都要覆盖。
+    const ws = state.workspacePath;
+    if (ws) {
+      for (const repo of state.repos) {
+        if (isSubPath(ws, repo.path) || isSubPath(repo.path, ws)) {
+          void loadRepoStatus(repo.path, true);
+        }
+      }
+    }
+  }
   const snapshot = Object.assign({}, state.settings);
   settingsSaveChain = settingsSaveChain.then(async () => {
     try {
@@ -677,7 +689,7 @@ async function loadRepoStatus(path, force) {
       );
       let parsed;
       if (res.code === 0) {
-        parsed = parseStatusPorcelain(res.stdout, res.stderr, gitVersion);
+        parsed = pruneExcludedUntracked(parseStatusPorcelain(res.stdout, res.stderr, gitVersion), state.settings);
       } else if (/unknown option|not a git repository|fatal: bad revision/i.test(res.stderr || "")) {
         const fallback = await runGit(
           key,
@@ -687,7 +699,7 @@ async function loadRepoStatus(path, force) {
         if (fallback.code !== 0) {
           throw new GitCommandError((fallback.stderr || fallback.stdout || "").trim(), fallback.entry);
         }
-        parsed = parseStatusPorcelain(fallback.stdout, fallback.stderr, gitVersion);
+        parsed = pruneExcludedUntracked(parseStatusPorcelain(fallback.stdout, fallback.stderr, gitVersion), state.settings);
       } else {
         throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
       }
@@ -938,7 +950,16 @@ async function loadRepoDetails(path, force) {
         safe(() => refs(["stash", "list", "--pretty=format:%gd%x1f%H%x1f%ct%x1f%gs"], 20000, parseStashes), [], "stashes"),
         safe(() => refs(["remote", "-v"], 10000, parseRemotes), [], "remotes"),
         safe(() => refs(["worktree", "list", "--porcelain"], 15000, parseWorktrees), [], "worktrees"),
-        safe(() => refs(["submodule", "status", "--recursive"], 20000, parseSubmodules), [], "submodules"),
+        safe(async () => {
+          try {
+            return await refs(["submodule", "status", "--recursive"], 20000, parseSubmodules);
+          } catch (error) {
+            // 索引里有 gitlink 而 .gitmodules 缺映射时 git 退出码 128；
+            // 这不是读取失败，用索引重建子模块列表即可。
+            if (!/no submodule mapping found/i.test(safeError(error))) throw error;
+            return await refs(["ls-files", "--stage"], 20000, parseGitlinks);
+          }
+        }, [], "submodules"),
         safe(async () => {
           const res = await runGit(key, ["log", "-1", "--format=%B"], {
             allowFailure: true,

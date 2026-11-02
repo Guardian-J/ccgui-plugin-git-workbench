@@ -355,7 +355,7 @@ function WorkbenchStatusBar() {
   const data = repo ? ensureRepoData(repo) : null;
   const branch = data ? data.status.branch : null;
   const detailErrors = data ? Object.keys(data.detailsErrors || {}) : [];
-  const detailErrorText = detailErrors.map((key) => key + ": " + data.detailsErrors[key]).join("\n");
+  const detailErrorText = detailErrorSummary(data && data.detailsErrors);
   const repoCount = s.repos.filter((item) => inWorkspace(item.path)).length;
   return h(
     "div",
@@ -370,7 +370,7 @@ function WorkbenchStatusBar() {
       ? h("span", { className: "cg-sb-item cg-sb-error", title: data.error }, h(Icon, { name: "warning", size: 11 }), "加载失败")
       : null,
     detailErrors.length
-      ? h("span", { className: "cg-sb-item cg-sb-warn", title: detailErrorText }, h(Icon, { name: "warning", size: 11 }), detailErrors.length + " 项引用读取失败")
+      ? h("span", { className: "cg-sb-item cg-sb-warn", title: detailErrorText }, h(Icon, { name: "warning", size: 11 }), detailErrors.length + " 项仓库信息读取失败")
       : null,
     data && data.refsTruncated
       ? h("span", { className: "cg-sb-item cg-sb-warn", title: "git 输出超过 64 KiB，列表已截断" }, h(Icon, { name: "info", size: 11 }), "引用列表已截断")

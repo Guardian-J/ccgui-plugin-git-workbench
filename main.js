@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.12";
+const PLUGIN_VERSION = "0.2.14";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -1267,6 +1267,33 @@ async function discoverRepos(workspacePath, settings, options) {
   return { repos, errors, targets };
 }
 
+/** 未跟踪条目按「排除目录」名单过滤：依赖、构建产物与编辑器缓存不应计入变更。
+ *  只作用于未跟踪（`?`），已跟踪文件的修改（未暂存）保持原样。 */
+function pruneExcludedUntracked(status, settings) {
+  if (!status || !Array.isArray(status.untracked) || !status.untracked.length) return status;
+  const excludes = normalizeExcludes(settings && settings.scanExclude);
+  if (!excludes.length) return status;
+  const skip = new Set(excludes.map((item) => item.toLowerCase()));
+  // entries 持有与 untracked 相同的条目引用，必须一起过滤：
+  // computeStatusSignature 只看 entries，不同步会导致内容变化被判为「未变」而沿用旧数据。
+  const dropped = new Set();
+  const kept = status.untracked.filter((entry) => {
+    const segments = String(entry.path || "").toLowerCase().split("/");
+    if (segments.some((segment) => skip.has(segment))) {
+      dropped.add(entry);
+      return false;
+    }
+    return true;
+  });
+  if (!dropped.size) return status;
+  return Object.assign({}, status, {
+    untracked: kept,
+    entries: Array.isArray(status.entries)
+      ? status.entries.filter((entry) => !dropped.has(entry))
+      : status.entries,
+  });
+}
+
 /** 快速摘要：分支/上游/变更数量，用于仓库列表与状态栏。 */
 async function loadQuickStatus(repoPath) {
   let res = await runGit(repoPath, ["-c", "status.aheadBehind=true", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"], {
@@ -1282,7 +1309,7 @@ async function loadQuickStatus(repoPath) {
   if (res.code !== 0) {
     return { error: maskSecrets((res.stderr || res.stdout || "git status 失败").trim()) };
   }
-  const parsed = parseStatusPorcelain(res.stdout, res.stderr, gitVersion);
+  const parsed = pruneExcludedUntracked(parseStatusPorcelain(res.stdout, res.stderr, gitVersion), state.settings);
   return {
     branch: parsed.branch,
     changed: uniquePaths(
@@ -1742,6 +1769,26 @@ function parseSubmodules(raw) {
       path,
       describe,
       tone: m[1] === "U" ? "conflict" : m[1] === "-" ? "missing" : m[1] === "+" ? "dirty" : "ok",
+    });
+  }
+  return out;
+}
+
+/** `.gitmodules` 缺映射导致 `git submodule status` 直接 fatal 时的兜底：
+ *  从索引里 mode 160000 的 gitlink 重建列表（这些路径本质仍是子模块）。 */
+function parseGitlinks(raw) {
+  const out = [];
+  for (const line of splitLines(raw)) {
+    const m = line.match(/^160000 ([0-9a-fA-F]+) \d+\t(.+)$/);
+    if (!m) continue;
+    const path = m[2].trim();
+    if (!path) continue;
+    out.push({
+      flag: "?",
+      hash: m[1],
+      path,
+      describe: "索引中的子模块，未在 .gitmodules 登记",
+      tone: "unknown",
     });
   }
   return out;
@@ -2302,6 +2349,18 @@ async function saveSettings(patch) {
   if (patch && Object.prototype.hasOwnProperty.call(patch, "skipHooks")) state.commitSkipHooks = Boolean(patch.skipHooks);
   if (patch && Object.prototype.hasOwnProperty.call(patch, "noGpgSign")) state.commitNoGpg = Boolean(patch.noGpgSign);
   notify();
+  if (patch && Object.prototype.hasOwnProperty.call(patch, "scanExclude")) {
+    // 排除名单参与未跟踪过滤，改变后立即重载当前工作区仓库，避免旧列表残留。
+    // 仓库根可能在工作区之上（工作区是上级仓库的子目录），两个方向都要覆盖。
+    const ws = state.workspacePath;
+    if (ws) {
+      for (const repo of state.repos) {
+        if (isSubPath(ws, repo.path) || isSubPath(repo.path, ws)) {
+          void loadRepoStatus(repo.path, true);
+        }
+      }
+    }
+  }
   const snapshot = Object.assign({}, state.settings);
   settingsSaveChain = settingsSaveChain.then(async () => {
     try {
@@ -2733,7 +2792,7 @@ async function loadRepoStatus(path, force) {
       );
       let parsed;
       if (res.code === 0) {
-        parsed = parseStatusPorcelain(res.stdout, res.stderr, gitVersion);
+        parsed = pruneExcludedUntracked(parseStatusPorcelain(res.stdout, res.stderr, gitVersion), state.settings);
       } else if (/unknown option|not a git repository|fatal: bad revision/i.test(res.stderr || "")) {
         const fallback = await runGit(
           key,
@@ -2743,7 +2802,7 @@ async function loadRepoStatus(path, force) {
         if (fallback.code !== 0) {
           throw new GitCommandError((fallback.stderr || fallback.stdout || "").trim(), fallback.entry);
         }
-        parsed = parseStatusPorcelain(fallback.stdout, fallback.stderr, gitVersion);
+        parsed = pruneExcludedUntracked(parseStatusPorcelain(fallback.stdout, fallback.stderr, gitVersion), state.settings);
       } else {
         throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
       }
@@ -2994,7 +3053,16 @@ async function loadRepoDetails(path, force) {
         safe(() => refs(["stash", "list", "--pretty=format:%gd%x1f%H%x1f%ct%x1f%gs"], 20000, parseStashes), [], "stashes"),
         safe(() => refs(["remote", "-v"], 10000, parseRemotes), [], "remotes"),
         safe(() => refs(["worktree", "list", "--porcelain"], 15000, parseWorktrees), [], "worktrees"),
-        safe(() => refs(["submodule", "status", "--recursive"], 20000, parseSubmodules), [], "submodules"),
+        safe(async () => {
+          try {
+            return await refs(["submodule", "status", "--recursive"], 20000, parseSubmodules);
+          } catch (error) {
+            // 索引里有 gitlink 而 .gitmodules 缺映射时 git 退出码 128；
+            // 这不是读取失败，用索引重建子模块列表即可。
+            if (!/no submodule mapping found/i.test(safeError(error))) throw error;
+            return await refs(["ls-files", "--stage"], 20000, parseGitlinks);
+          }
+        }, [], "submodules"),
         safe(async () => {
           const res = await runGit(key, ["log", "-1", "--format=%B"], {
             allowFailure: true,
@@ -6301,6 +6369,22 @@ function Select(props) {
   );
 }
 
+const DETAIL_ERROR_LABELS = {
+  branches: "分支",
+  tags: "标签",
+  stashes: "贮藏",
+  remotes: "远程",
+  worktrees: "Worktree",
+  submodules: "子模块",
+};
+
+/** `detailsErrors` → 多行可读明细，用作 title / 悬停提示。 */
+function detailErrorSummary(errors) {
+  return Object.keys(errors || {})
+    .map((key) => (DETAIL_ERROR_LABELS[key] || key) + "：" + errors[key])
+    .join("\n");
+}
+
 function Badge(props) {
   return appCtx.react.createElement(
     "span",
@@ -7006,7 +7090,7 @@ function WorkbenchStatusBar() {
   const data = repo ? ensureRepoData(repo) : null;
   const branch = data ? data.status.branch : null;
   const detailErrors = data ? Object.keys(data.detailsErrors || {}) : [];
-  const detailErrorText = detailErrors.map((key) => key + ": " + data.detailsErrors[key]).join("\n");
+  const detailErrorText = detailErrorSummary(data && data.detailsErrors);
   const repoCount = s.repos.filter((item) => inWorkspace(item.path)).length;
   return h(
     "div",
@@ -7021,7 +7105,7 @@ function WorkbenchStatusBar() {
       ? h("span", { className: "cg-sb-item cg-sb-error", title: data.error }, h(Icon, { name: "warning", size: 11 }), "加载失败")
       : null,
     detailErrors.length
-      ? h("span", { className: "cg-sb-item cg-sb-warn", title: detailErrorText }, h(Icon, { name: "warning", size: 11 }), detailErrors.length + " 项引用读取失败")
+      ? h("span", { className: "cg-sb-item cg-sb-warn", title: detailErrorText }, h(Icon, { name: "warning", size: 11 }), detailErrors.length + " 项仓库信息读取失败")
       : null,
     data && data.refsTruncated
       ? h("span", { className: "cg-sb-item cg-sb-warn", title: "git 输出超过 64 KiB，列表已截断" }, h(Icon, { name: "info", size: 11 }), "引用列表已截断")
@@ -9846,7 +9930,7 @@ function SubmodulesTab(props) {
                   "div",
                   { className: "cg-list-title" },
                   h("b", null, item.path),
-                  h(Badge, { tone: item.tone === "conflict" ? "conflict" : item.tone === "dirty" ? "mod" : item.tone === "missing" ? "del" : "neutral" }, item.flag.trim() || "正常"),
+                  h(Badge, { tone: item.tone === "conflict" ? "conflict" : item.tone === "dirty" ? "mod" : item.tone === "missing" ? "del" : "neutral" }, item.tone === "unknown" ? "未登记" : item.flag.trim() || "正常"),
                   h("span", { className: "cg-mono cg-muted cg-mini" }, shortHash(item.hash)),
                 ),
                 h("div", { className: "cg-list-sub" }, item.describe || ""),
@@ -10038,7 +10122,7 @@ function SettingsForm(props) {
           save({ scanDepth: clamped });
         },
       }),
-      h("label", null, "排除目录"),
+      h("label", { title: "仓库扫描时跳过这些目录；未跟踪列表也会过滤同名目录（已跟踪文件的修改不受影响）" }, "排除目录"),
       h("textarea", {
         className: "cg-textarea",
         rows: 3,
@@ -10347,7 +10431,8 @@ function CompactPanel(props) {
             h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "分支"), h("b", { className: "cg-ellipsis", title: branch.head }, branch.detached ? "游离 HEAD" : branch.head || "(无)")),
             h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "变更文件"), h("b", null, quick ? quick.changed || 0 : countChanges(data))),
             h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "暂存区"), h("b", null, quick ? quick.staged || 0 : data.status.staged.length)),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "未暂存"), h("b", null, quick ? (quick.unstaged || 0) + (quick.untracked || 0) : data.status.unstaged.length + data.status.untracked.length)),
+            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "未暂存"), h("b", null, quick ? quick.unstaged || 0 : data.status.unstaged.length)),
+            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "未跟踪"), h("b", null, quick ? quick.untracked || 0 : data.status.untracked.length)),
             h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "领先/落后"), h("b", null, "↑" + (branch.ahead || 0) + " ↓" + (branch.behind || 0))),
             h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "仓库"), h("b", { className: "cg-ellipsis", title: repo }, repoDisplayName(repo))),
           ),
@@ -10362,8 +10447,12 @@ function CompactPanel(props) {
           Object.keys(data.detailsErrors || {}).length || data.refsTruncated
             ? h(
                 "div",
-                { className: "cg-notice", style: { margin: "0 12px 8px" } },
-                Object.keys(data.detailsErrors || {}).length ? Object.keys(data.detailsErrors).length + " 项引用读取失败" : "",
+                {
+                  className: "cg-notice",
+                  style: { margin: "0 12px 8px" },
+                  title: detailErrorSummary(data.detailsErrors),
+                },
+                Object.keys(data.detailsErrors || {}).length ? Object.keys(data.detailsErrors).length + " 项仓库信息读取失败" : "",
                 data.refsTruncated ? "引用列表已截断（超过 64 KiB）" : "",
               )
             : null,

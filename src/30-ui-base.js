@@ -587,6 +587,22 @@ function Select(props) {
   );
 }
 
+const DETAIL_ERROR_LABELS = {
+  branches: "分支",
+  tags: "标签",
+  stashes: "贮藏",
+  remotes: "远程",
+  worktrees: "Worktree",
+  submodules: "子模块",
+};
+
+/** `detailsErrors` → 多行可读明细，用作 title / 悬停提示。 */
+function detailErrorSummary(errors) {
+  return Object.keys(errors || {})
+    .map((key) => (DETAIL_ERROR_LABELS[key] || key) + "：" + errors[key])
+    .join("\n");
+}
+
 function Badge(props) {
   return appCtx.react.createElement(
     "span",

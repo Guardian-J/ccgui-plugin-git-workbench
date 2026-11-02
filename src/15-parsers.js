@@ -442,6 +442,26 @@ function parseSubmodules(raw) {
   return out;
 }
 
+/** `.gitmodules` 缺映射导致 `git submodule status` 直接 fatal 时的兜底：
+ *  从索引里 mode 160000 的 gitlink 重建列表（这些路径本质仍是子模块）。 */
+function parseGitlinks(raw) {
+  const out = [];
+  for (const line of splitLines(raw)) {
+    const m = line.match(/^160000 ([0-9a-fA-F]+) \d+\t(.+)$/);
+    if (!m) continue;
+    const path = m[2].trim();
+    if (!path) continue;
+    out.push({
+      flag: "?",
+      hash: m[1],
+      path,
+      describe: "索引中的子模块，未在 .gitmodules 登记",
+      tone: "unknown",
+    });
+  }
+  return out;
+}
+
 function decodeGitPath(raw) {
   const value = String(raw || "").trim();
   if (value === "/dev/null") return null;
