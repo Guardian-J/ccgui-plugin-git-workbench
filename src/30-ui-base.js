@@ -372,10 +372,14 @@ const PLUGIN_CSS = `
 .cg-panel-heading{display:flex;flex-direction:column;gap:1px;min-width:0}
 .cg-panel-heading b{font-size:0.7813rem;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cg-panel-heading span{font-size:0.6563rem;color:var(--color-text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cg-panel-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0.375rem 0.5rem;padding:0.5rem 0.75rem}
-.cg-stat{border:1px solid transparent;border-radius:0.5625rem;padding:0.375rem 0.5625rem;display:flex;flex-direction:column;gap:1px;background:var(--cg-surface-2);min-width:0}
-.cg-stat>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cg-stat b{font-size:0.8125rem;font-weight:650;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cg-panel-summary{display:flex;flex-direction:column;gap:0.125rem;padding:0.375rem 0.875rem;border-bottom:1px solid var(--cg-border);line-height:1.35}
+.cg-summary-row{display:flex;align-items:center;gap:0.75rem;min-width:0;font-size:0.6875rem;color:var(--color-text-tertiary)}
+.cg-summary-counts{flex-wrap:wrap;gap:0.125rem 0.875rem}
+.cg-summary-item{display:inline-flex;align-items:center;gap:0.1875rem;white-space:nowrap}
+.cg-summary-item b{font-size:0.75rem;font-weight:650;color:var(--color-text-primary);font-variant-numeric:tabular-nums}
+.cg-summary-branch{min-width:0;max-width:12rem;gap:0.25rem;color:var(--color-text-primary)}
+.cg-summary-branch b{max-width:9rem}
+.cg-summary-repo{margin-left:auto;min-width:0;max-width:10rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-secondary)}
 .cg-panel-list{flex:1;overflow:auto;min-height:0;padding:0 0.625rem 0.75rem}
 /* 仓库区最多占面板高度 45%，不按行数写死高度。 */
 .cg-panel-list.cg-panel-repos{flex:0 1 auto;max-height:min(8.5rem,45%);overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}

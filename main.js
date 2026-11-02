@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.14";
+const PLUGIN_VERSION = "0.2.15";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -6154,10 +6154,14 @@ const PLUGIN_CSS = `
 .cg-panel-heading{display:flex;flex-direction:column;gap:1px;min-width:0}
 .cg-panel-heading b{font-size:0.7813rem;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cg-panel-heading span{font-size:0.6563rem;color:var(--color-text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cg-panel-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0.375rem 0.5rem;padding:0.5rem 0.75rem}
-.cg-stat{border:1px solid transparent;border-radius:0.5625rem;padding:0.375rem 0.5625rem;display:flex;flex-direction:column;gap:1px;background:var(--cg-surface-2);min-width:0}
-.cg-stat>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cg-stat b{font-size:0.8125rem;font-weight:650;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cg-panel-summary{display:flex;flex-direction:column;gap:0.125rem;padding:0.375rem 0.875rem;border-bottom:1px solid var(--cg-border);line-height:1.35}
+.cg-summary-row{display:flex;align-items:center;gap:0.75rem;min-width:0;font-size:0.6875rem;color:var(--color-text-tertiary)}
+.cg-summary-counts{flex-wrap:wrap;gap:0.125rem 0.875rem}
+.cg-summary-item{display:inline-flex;align-items:center;gap:0.1875rem;white-space:nowrap}
+.cg-summary-item b{font-size:0.75rem;font-weight:650;color:var(--color-text-primary);font-variant-numeric:tabular-nums}
+.cg-summary-branch{min-width:0;max-width:12rem;gap:0.25rem;color:var(--color-text-primary)}
+.cg-summary-branch b{max-width:9rem}
+.cg-summary-repo{margin-left:auto;min-width:0;max-width:10rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-secondary)}
 .cg-panel-list{flex:1;overflow:auto;min-height:0;padding:0 0.625rem 0.75rem}
 /* 仓库区最多占面板高度 45%，不按行数写死高度。 */
 .cg-panel-list.cg-panel-repos{flex:0 1 auto;max-height:min(8.5rem,45%);overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
@@ -10428,13 +10432,26 @@ function CompactPanel(props) {
           h(
             "div",
             { className: "cg-panel-summary" },
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "分支"), h("b", { className: "cg-ellipsis", title: branch.head }, branch.detached ? "游离 HEAD" : branch.head || "(无)")),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "变更文件"), h("b", null, quick ? quick.changed || 0 : countChanges(data))),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "暂存区"), h("b", null, quick ? quick.staged || 0 : data.status.staged.length)),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "未暂存"), h("b", null, quick ? quick.unstaged || 0 : data.status.unstaged.length)),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "未跟踪"), h("b", null, quick ? quick.untracked || 0 : data.status.untracked.length)),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "领先/落后"), h("b", null, "↑" + (branch.ahead || 0) + " ↓" + (branch.behind || 0))),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "仓库"), h("b", { className: "cg-ellipsis", title: repo }, repoDisplayName(repo))),
+            h(
+              "div",
+              { className: "cg-summary-row" },
+              h(
+                "span",
+                { className: "cg-summary-item cg-summary-branch", title: "分支" },
+                h(Icon, { name: "branch", size: 11 }),
+                h("b", { className: "cg-ellipsis" }, branch.detached ? "游离 HEAD" : branch.head || "(无)"),
+              ),
+              h("span", { className: "cg-summary-item", title: "领先/落后" }, "↑" + (branch.ahead || 0) + " ↓" + (branch.behind || 0)),
+              h("span", { className: "cg-summary-repo", title: repo }, repoDisplayName(repo)),
+            ),
+            h(
+              "div",
+              { className: "cg-summary-row cg-summary-counts" },
+              h("span", { className: "cg-summary-item", title: "变更文件" }, "变更 ", h("b", null, quick ? quick.changed || 0 : countChanges(data))),
+              h("span", { className: "cg-summary-item", title: "暂存区" }, "暂存 ", h("b", null, quick ? quick.staged || 0 : data.status.staged.length)),
+              h("span", { className: "cg-summary-item", title: "未暂存" }, "未暂存 ", h("b", null, quick ? quick.unstaged || 0 : data.status.unstaged.length)),
+              h("span", { className: "cg-summary-item", title: "未跟踪" }, "未跟踪 ", h("b", null, quick ? quick.untracked || 0 : data.status.untracked.length)),
+            ),
           ),
           h(
             "div",

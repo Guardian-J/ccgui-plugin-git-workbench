@@ -1085,13 +1085,26 @@ function CompactPanel(props) {
           h(
             "div",
             { className: "cg-panel-summary" },
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "分支"), h("b", { className: "cg-ellipsis", title: branch.head }, branch.detached ? "游离 HEAD" : branch.head || "(无)")),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "变更文件"), h("b", null, quick ? quick.changed || 0 : countChanges(data))),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "暂存区"), h("b", null, quick ? quick.staged || 0 : data.status.staged.length)),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "未暂存"), h("b", null, quick ? quick.unstaged || 0 : data.status.unstaged.length)),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "未跟踪"), h("b", null, quick ? quick.untracked || 0 : data.status.untracked.length)),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "领先/落后"), h("b", null, "↑" + (branch.ahead || 0) + " ↓" + (branch.behind || 0))),
-            h("div", { className: "cg-stat" }, h("span", { className: "cg-muted cg-mini" }, "仓库"), h("b", { className: "cg-ellipsis", title: repo }, repoDisplayName(repo))),
+            h(
+              "div",
+              { className: "cg-summary-row" },
+              h(
+                "span",
+                { className: "cg-summary-item cg-summary-branch", title: "分支" },
+                h(Icon, { name: "branch", size: 11 }),
+                h("b", { className: "cg-ellipsis" }, branch.detached ? "游离 HEAD" : branch.head || "(无)"),
+              ),
+              h("span", { className: "cg-summary-item", title: "领先/落后" }, "↑" + (branch.ahead || 0) + " ↓" + (branch.behind || 0)),
+              h("span", { className: "cg-summary-repo", title: repo }, repoDisplayName(repo)),
+            ),
+            h(
+              "div",
+              { className: "cg-summary-row cg-summary-counts" },
+              h("span", { className: "cg-summary-item", title: "变更文件" }, "变更 ", h("b", null, quick ? quick.changed || 0 : countChanges(data))),
+              h("span", { className: "cg-summary-item", title: "暂存区" }, "暂存 ", h("b", null, quick ? quick.staged || 0 : data.status.staged.length)),
+              h("span", { className: "cg-summary-item", title: "未暂存" }, "未暂存 ", h("b", null, quick ? quick.unstaged || 0 : data.status.unstaged.length)),
+              h("span", { className: "cg-summary-item", title: "未跟踪" }, "未跟踪 ", h("b", null, quick ? quick.untracked || 0 : data.status.untracked.length)),
+            ),
           ),
           h(
             "div",
