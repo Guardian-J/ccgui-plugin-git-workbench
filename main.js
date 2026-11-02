@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.17";
+const PLUGIN_VERSION = "0.2.18";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -6161,7 +6161,9 @@ const PLUGIN_CSS = `
 .cg-panel-heading{display:flex;flex-direction:column;gap:1px;min-width:0}
 .cg-panel-heading b{font-size:0.7813rem;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cg-panel-heading span{font-size:0.6563rem;color:var(--color-text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cg-panel-section{flex:none}
+.cg-panel-card{flex:none;margin:0.375rem 0.625rem 0.5rem;border:1px solid var(--cg-border);border-radius:0.625rem;background:var(--cg-surface-2);overflow:hidden}
+.cg-panel-card-head{display:flex;align-items:center;gap:0.375rem;padding:0.375rem 0.75rem;font-size:0.6875rem;font-weight:650;letter-spacing:.04em;color:var(--color-text-tertiary);border-bottom:1px solid var(--cg-border)}
+.cg-panel-card>.cg-panel-summary{padding:0.375rem 0.75rem;border-bottom:0}
 .cg-panel-summary{display:flex;flex-direction:column;gap:0.125rem;padding:0.375rem 0.875rem;border-bottom:1px solid var(--cg-border);line-height:1.35}
 .cg-summary-row{display:flex;align-items:center;gap:0.75rem;min-width:0;font-size:0.6875rem;color:var(--color-text-tertiary)}
 .cg-summary-counts{flex-wrap:wrap;gap:0.125rem 0.875rem}
@@ -10440,10 +10442,10 @@ function CompactPanel(props) {
           null,
           h(
             "div",
-            { className: "cg-panel-section" },
+            { className: "cg-panel-card" },
             h(
               "div",
-              { className: "cg-section-title", style: { position: "static" } },
+              { className: "cg-panel-card-head" },
               h(Icon, { name: "git", size: 11 }),
               h("span", null, "仓库状态"),
               h(Badge, null, quick ? quick.changed || 0 : countChanges(data)),
