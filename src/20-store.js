@@ -386,12 +386,16 @@ async function withBusy(label, task) {
   }
 }
 
-function reportError(error, prefix) {
+function formatError(error, prefix) {
   const message = safeError(error);
   const hint = networkHintFor(message);
   // 提示放尾部，但先把原始错误收窄，避免随后的 600 字截断把它吃掉。
   const body = hint ? truncate(message, 360) + hint : message;
-  const text = (prefix ? prefix + "：" : "") + body;
+  return (prefix ? prefix + "：" : "") + body;
+}
+
+function reportError(error, prefix) {
+  const text = formatError(error, prefix);
   toast(truncate(text, 600), "error");
   return text;
 }

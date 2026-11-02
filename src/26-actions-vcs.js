@@ -134,28 +134,54 @@ async function pushCurrent(repo, options) {
   const upstreamRemote = slash > 0 ? branch.upstream.slice(0, slash) : "";
   const upstreamBranch = slash > 0 ? branch.upstream.slice(slash + 1) : "";
   const setUpstream = opts.setUpstream === null ? !hasUpstream : Boolean(opts.setUpstream);
-  return perform(repo, "推送", async () => {
-    const args = ["push"];
-    if (opts.all) args.push("--all");
-    if (opts.force) args.push("--force-with-lease");
-    if (opts.tags) args.push("--tags");
-    if (setUpstream) args.push("--set-upstream");
-    args.push("--", remote);
-    if (opts.all) {
-      // --all 已在前方指定，这里只需要 remote。
-    } else if (hasUpstream && upstreamRemote === remote && upstreamBranch) {
-      // 尊重已配置的上游分支名（本地与远程可能不同名）。
-      args.push(branch.head + ":" + upstreamBranch);
-    } else {
-      args.push(branch.head);
-    }
-    const res = await runGit(repo, args, {
-      allowFailure: true,
-      timeoutMs: NETWORK_TIMEOUT_MS,
-    });
-    if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-    return (res.stderr || res.stdout || "").trim();
-  }, { success: "推送完成", details: true });
+  const runPush = (silentError) =>
+    perform(repo, "推送", async () => {
+      const args = ["push"];
+      if (opts.all) args.push("--all");
+      if (opts.force) args.push("--force-with-lease");
+      if (opts.tags) args.push("--tags");
+      if (setUpstream) args.push("--set-upstream");
+      args.push("--", remote);
+      if (opts.all) {
+        // --all 已在前方指定，这里只需要 remote。
+      } else if (hasUpstream && upstreamRemote === remote && upstreamBranch) {
+        // 尊重已配置的上游分支名（本地与远程可能不同名）。
+        args.push(branch.head + ":" + upstreamBranch);
+      } else {
+        args.push(branch.head);
+      }
+      const res = await runGit(repo, args, {
+        allowFailure: true,
+        timeoutMs: NETWORK_TIMEOUT_MS,
+      });
+      if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
+      return (res.stderr || res.stdout || "").trim();
+    }, { success: "推送完成", details: true, silentError });
+
+  // 首次静默：非快进拒绝会自动拉取重试，避免先闪一条错误提示。
+  const first = await runPush(true);
+  if (first.ok) return first;
+  // 非快进拒绝（远程有新提交）时自动拉取一次再重推，省掉手动 fetch + pull + push。
+  // 强制推送与多引用推送不自动合并，避免覆盖或跨分支误操作。
+  const raw = safeError(first.error);
+  const retry = !opts.force && !opts.all && !opts.tags && /\[rejected\]/.test(raw) && /(fetch first|non-fast-forward)/i.test(raw);
+  if (!retry) {
+    toast(truncate(first.text, 600), "error");
+    return first;
+  }
+  toast("远程有新提交，正在自动拉取并重试推送…", "info");
+  const pulled = await pullRepo(repo, { strategy: state.settings.pullStrategy, autostash: true });
+  if (!pulled.ok) {
+    toast(truncate(first.text, 600), "error");
+    return first;
+  }
+  if (pulled.value && pulled.value.conflict) {
+    toast("推送已取消：解决冲突后可重新推送", "warning");
+    return first;
+  }
+  const second = await runPush(false);
+  if (second.ok) toast("已合并远程更新并重新推送到 " + remote, "success");
+  return second;
 }
 
 async function updateProject(repo) {

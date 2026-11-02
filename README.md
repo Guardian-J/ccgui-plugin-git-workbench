@@ -35,7 +35,7 @@ node --check main.js
 - **分支**：本地/远程分支列表、检出、新建、重命名、删除/强制删除、合并（默认/--no-ff/--ff-only/--squash）、变基、设置/取消上游、与当前分支比较、删除远程分支；远程分支也可合并/变基。
 - **Stash**：创建（含未跟踪、保留索引）、查看 diff 与文件清单、Apply/Pop/Drop、从 Stash 新建分支、清空。
 - **标签**：轻量/注释标签、检出、基于标签新建分支、推送单个/全部、删除本地/远程标签。
-- **远程**：添加、删除、重命名、修改 URL、Fetch、Prune、推送全部标签；Pull 支持 merge/rebase/ff-only 与 autostash。
+- **远程**：添加、删除、重命名、修改 URL、Fetch、Prune、推送全部标签；Pull 支持 merge/rebase/ff-only 与 autostash；推送因远程有新提交被拒（fetch first / non-fast-forward）时按拉取策略自动拉取一次并重推，冲突则提示解决后重试（强制推送与 `--all`/`--tags` 不自动合并）。
 - **子模块与 Worktree**：更新、同步 URL、添加、删除子模块；新建/删除/清理 Worktree，并可从 Worktree 列表切换仓库。
 - **文件历史与 Blame**：文件历史复用提交图筛选；Blame 分段加载，点击提交查看详情。
 - **补丁**：导出工作区/提交 diff；应用补丁文件（可选 `--3way`），三方应用后会取消索引写入，保留工作区改动。

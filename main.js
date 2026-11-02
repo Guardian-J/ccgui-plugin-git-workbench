@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.21";
+const PLUGIN_VERSION = "0.2.22";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -2495,12 +2495,16 @@ async function withBusy(label, task) {
   }
 }
 
-function reportError(error, prefix) {
+function formatError(error, prefix) {
   const message = safeError(error);
   const hint = networkHintFor(message);
   // 提示放尾部，但先把原始错误收窄，避免随后的 600 字截断把它吃掉。
   const body = hint ? truncate(message, 360) + hint : message;
-  const text = (prefix ? prefix + "：" : "") + body;
+  return (prefix ? prefix + "：" : "") + body;
+}
+
+function reportError(error, prefix) {
+  const text = formatError(error, prefix);
   toast(truncate(text, 600), "error");
   return text;
 }
@@ -3320,7 +3324,8 @@ async function perform(repo, label, task, options) {
         if (opts.success && !(value && value.canceled)) toast(opts.success, "success");
         return { ok: true, value };
       } catch (error) {
-        const text = reportError(error, opts.errorPrefix || label);
+        // silentError：调用方会自行决定是否提示（例如推送被拒后自动拉取重试）。
+        const text = opts.silentError ? formatError(error, opts.errorPrefix || label) : reportError(error, opts.errorPrefix || label);
         // 部分失败发生在状态已改动之后（钩子拒绝提交、--3way 留下冲突标记等）；
         // 失败也刷新一次，避免界面与索引/工作区脱节。
         if (repo) await refreshRepo(repo, { details: true }).catch(() => undefined);
@@ -4599,28 +4604,54 @@ async function pushCurrent(repo, options) {
   const upstreamRemote = slash > 0 ? branch.upstream.slice(0, slash) : "";
   const upstreamBranch = slash > 0 ? branch.upstream.slice(slash + 1) : "";
   const setUpstream = opts.setUpstream === null ? !hasUpstream : Boolean(opts.setUpstream);
-  return perform(repo, "推送", async () => {
-    const args = ["push"];
-    if (opts.all) args.push("--all");
-    if (opts.force) args.push("--force-with-lease");
-    if (opts.tags) args.push("--tags");
-    if (setUpstream) args.push("--set-upstream");
-    args.push("--", remote);
-    if (opts.all) {
-      // --all 已在前方指定，这里只需要 remote。
-    } else if (hasUpstream && upstreamRemote === remote && upstreamBranch) {
-      // 尊重已配置的上游分支名（本地与远程可能不同名）。
-      args.push(branch.head + ":" + upstreamBranch);
-    } else {
-      args.push(branch.head);
-    }
-    const res = await runGit(repo, args, {
-      allowFailure: true,
-      timeoutMs: NETWORK_TIMEOUT_MS,
-    });
-    if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
-    return (res.stderr || res.stdout || "").trim();
-  }, { success: "推送完成", details: true });
+  const runPush = (silentError) =>
+    perform(repo, "推送", async () => {
+      const args = ["push"];
+      if (opts.all) args.push("--all");
+      if (opts.force) args.push("--force-with-lease");
+      if (opts.tags) args.push("--tags");
+      if (setUpstream) args.push("--set-upstream");
+      args.push("--", remote);
+      if (opts.all) {
+        // --all 已在前方指定，这里只需要 remote。
+      } else if (hasUpstream && upstreamRemote === remote && upstreamBranch) {
+        // 尊重已配置的上游分支名（本地与远程可能不同名）。
+        args.push(branch.head + ":" + upstreamBranch);
+      } else {
+        args.push(branch.head);
+      }
+      const res = await runGit(repo, args, {
+        allowFailure: true,
+        timeoutMs: NETWORK_TIMEOUT_MS,
+      });
+      if (res.code !== 0) throw new GitCommandError((res.stderr || res.stdout || "").trim(), res.entry);
+      return (res.stderr || res.stdout || "").trim();
+    }, { success: "推送完成", details: true, silentError });
+
+  // 首次静默：非快进拒绝会自动拉取重试，避免先闪一条错误提示。
+  const first = await runPush(true);
+  if (first.ok) return first;
+  // 非快进拒绝（远程有新提交）时自动拉取一次再重推，省掉手动 fetch + pull + push。
+  // 强制推送与多引用推送不自动合并，避免覆盖或跨分支误操作。
+  const raw = safeError(first.error);
+  const retry = !opts.force && !opts.all && !opts.tags && /\[rejected\]/.test(raw) && /(fetch first|non-fast-forward)/i.test(raw);
+  if (!retry) {
+    toast(truncate(first.text, 600), "error");
+    return first;
+  }
+  toast("远程有新提交，正在自动拉取并重试推送…", "info");
+  const pulled = await pullRepo(repo, { strategy: state.settings.pullStrategy, autostash: true });
+  if (!pulled.ok) {
+    toast(truncate(first.text, 600), "error");
+    return first;
+  }
+  if (pulled.value && pulled.value.conflict) {
+    toast("推送已取消：解决冲突后可重新推送", "warning");
+    return first;
+  }
+  const second = await runPush(false);
+  if (second.ok) toast("已合并远程更新并重新推送到 " + remote, "success");
+  return second;
 }
 
 async function updateProject(repo) {

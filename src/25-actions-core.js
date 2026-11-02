@@ -35,7 +35,8 @@ async function perform(repo, label, task, options) {
         if (opts.success && !(value && value.canceled)) toast(opts.success, "success");
         return { ok: true, value };
       } catch (error) {
-        const text = reportError(error, opts.errorPrefix || label);
+        // silentError：调用方会自行决定是否提示（例如推送被拒后自动拉取重试）。
+        const text = opts.silentError ? formatError(error, opts.errorPrefix || label) : reportError(error, opts.errorPrefix || label);
         // 部分失败发生在状态已改动之后（钩子拒绝提交、--3way 留下冲突标记等）；
         // 失败也刷新一次，避免界面与索引/工作区脱节。
         if (repo) await refreshRepo(repo, { details: true }).catch(() => undefined);
