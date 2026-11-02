@@ -995,17 +995,6 @@ function CompactPanel(props) {
     { className: "cg-panel" },
     h(
       "div",
-      { className: "cg-panel-head" },
-      h(Icon, { name: "git", size: 14 }),
-      h(
-        "div",
-        { className: "cg-panel-heading" },
-        h("b", { className: "cg-ellipsis" }, "Git 面板"),
-        h("span", { className: "cg-ellipsis", title: s.workspacePath || "" }, s.workspaceName || s.workspacePath || "未连接工作区"),
-      ),
-    ),
-    h(
-      "div",
       {
         className: "cg-panel-list cg-panel-repos",
         // 列表容器默认 flex:1 撑满剩余高度，折叠时必须取消伸展，否则下方内容被推到底部。
@@ -1029,6 +1018,7 @@ function CompactPanel(props) {
         h(Icon, { name: reposOpen ? "chevron-down" : "chevron-right", size: 11 }),
         h("span", null, "工作区仓库"),
         h(Badge, null, workspaceRepos.length),
+        h("span", { className: "cg-section-wsname cg-ellipsis", title: s.workspacePath || "" }, s.workspaceName || s.workspacePath || "未连接工作区"),
         h(
           "span",
           { className: "cg-section-actions", onClick: (event) => event.stopPropagation(), onKeyDown: (event) => event.stopPropagation() },

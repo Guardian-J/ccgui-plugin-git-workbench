@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.20";
+const PLUGIN_VERSION = "0.2.21";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -6158,11 +6158,7 @@ const PLUGIN_CSS = `
 .cg-panel-glyph{font-family:var(--font-sans);font-size:var(--text-body-2-medium,0.8125rem);font-weight:var(--text-body-2-medium--font-weight,500);line-height:var(--text-body-2-medium--line-height,1.125rem);white-space:nowrap}
 .cg-panel-glyph-text{overflow:hidden;text-overflow:ellipsis}
 .cg-panel{height:100%;display:flex;flex-direction:column;overflow:hidden;font-family:var(--font-sans);font-size:0.8125rem;line-height:1.5;color:var(--color-text-primary);background:var(--cg-surface)}
-.cg-panel-head{display:flex;align-items:center;gap:0.5625rem;padding:0.6875rem 0.875rem;border-bottom:1px solid var(--cg-border);min-height:3.125rem}
-.cg-panel-head>svg:first-child{width:1.625rem;height:1.625rem;padding:0.375rem;border-radius:0.5rem;background:var(--cg-accent-soft);color:var(--cg-accent-text)}
-.cg-panel-heading{display:flex;flex-direction:column;gap:1px;min-width:0}
-.cg-panel-heading b{font-size:0.7813rem;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cg-panel-heading span{font-size:0.6563rem;color:var(--color-text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cg-section-wsname{flex:1;min-width:0;font-weight:400;letter-spacing:0;opacity:.75}
 .cg-panel-card{flex:none;margin:0.375rem 0.625rem 0.5rem;border:1px solid var(--cg-border);border-radius:0.625rem;background:var(--cg-surface-2);overflow:hidden}
 .cg-panel-card>.cg-panel-summary{padding:0.4375rem 0.75rem;border-bottom:0}
 .cg-panel-summary{display:flex;flex-direction:column;gap:0.125rem;padding:0.375rem 0.875rem;border-bottom:1px solid var(--cg-border);line-height:1.35}
@@ -10354,17 +10350,6 @@ function CompactPanel(props) {
     { className: "cg-panel" },
     h(
       "div",
-      { className: "cg-panel-head" },
-      h(Icon, { name: "git", size: 14 }),
-      h(
-        "div",
-        { className: "cg-panel-heading" },
-        h("b", { className: "cg-ellipsis" }, "Git 面板"),
-        h("span", { className: "cg-ellipsis", title: s.workspacePath || "" }, s.workspaceName || s.workspacePath || "未连接工作区"),
-      ),
-    ),
-    h(
-      "div",
       {
         className: "cg-panel-list cg-panel-repos",
         // 列表容器默认 flex:1 撑满剩余高度，折叠时必须取消伸展，否则下方内容被推到底部。
@@ -10388,6 +10373,7 @@ function CompactPanel(props) {
         h(Icon, { name: reposOpen ? "chevron-down" : "chevron-right", size: 11 }),
         h("span", null, "工作区仓库"),
         h(Badge, null, workspaceRepos.length),
+        h("span", { className: "cg-section-wsname cg-ellipsis", title: s.workspacePath || "" }, s.workspaceName || s.workspacePath || "未连接工作区"),
         h(
           "span",
           { className: "cg-section-actions", onClick: (event) => event.stopPropagation(), onKeyDown: (event) => event.stopPropagation() },
