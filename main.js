@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.15";
+const PLUGIN_VERSION = "0.2.16";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -6154,6 +6154,7 @@ const PLUGIN_CSS = `
 .cg-panel-heading{display:flex;flex-direction:column;gap:1px;min-width:0}
 .cg-panel-heading b{font-size:0.7813rem;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cg-panel-heading span{font-size:0.6563rem;color:var(--color-text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cg-panel-section{flex:none}
 .cg-panel-summary{display:flex;flex-direction:column;gap:0.125rem;padding:0.375rem 0.875rem;border-bottom:1px solid var(--cg-border);line-height:1.35}
 .cg-summary-row{display:flex;align-items:center;gap:0.75rem;min-width:0;font-size:0.6875rem;color:var(--color-text-tertiary)}
 .cg-summary-counts{flex-wrap:wrap;gap:0.125rem 0.875rem}
@@ -10431,26 +10432,37 @@ function CompactPanel(props) {
           null,
           h(
             "div",
-            { className: "cg-panel-summary" },
+            { className: "cg-panel-section" },
             h(
               "div",
-              { className: "cg-summary-row" },
-              h(
-                "span",
-                { className: "cg-summary-item cg-summary-branch", title: "分支" },
-                h(Icon, { name: "branch", size: 11 }),
-                h("b", { className: "cg-ellipsis" }, branch.detached ? "游离 HEAD" : branch.head || "(无)"),
-              ),
-              h("span", { className: "cg-summary-item", title: "领先/落后" }, "↑" + (branch.ahead || 0) + " ↓" + (branch.behind || 0)),
-              h("span", { className: "cg-summary-repo", title: repo }, repoDisplayName(repo)),
+              { className: "cg-section-title", style: { position: "static" } },
+              h(Icon, { name: "git", size: 11 }),
+              h("span", null, "仓库状态"),
+              h(Badge, null, quick ? quick.changed || 0 : countChanges(data)),
             ),
             h(
               "div",
-              { className: "cg-summary-row cg-summary-counts" },
-              h("span", { className: "cg-summary-item", title: "变更文件" }, "变更 ", h("b", null, quick ? quick.changed || 0 : countChanges(data))),
-              h("span", { className: "cg-summary-item", title: "暂存区" }, "暂存 ", h("b", null, quick ? quick.staged || 0 : data.status.staged.length)),
-              h("span", { className: "cg-summary-item", title: "未暂存" }, "未暂存 ", h("b", null, quick ? quick.unstaged || 0 : data.status.unstaged.length)),
-              h("span", { className: "cg-summary-item", title: "未跟踪" }, "未跟踪 ", h("b", null, quick ? quick.untracked || 0 : data.status.untracked.length)),
+              { className: "cg-panel-summary" },
+              h(
+                "div",
+                { className: "cg-summary-row" },
+                h(
+                  "span",
+                  { className: "cg-summary-item cg-summary-branch", title: "分支" },
+                  h(Icon, { name: "branch", size: 11 }),
+                  h("b", { className: "cg-ellipsis" }, branch.detached ? "游离 HEAD" : branch.head || "(无)"),
+                ),
+                h("span", { className: "cg-summary-item", title: "领先/落后" }, "↑" + (branch.ahead || 0) + " ↓" + (branch.behind || 0)),
+                h("span", { className: "cg-summary-repo", title: repo }, repoDisplayName(repo)),
+              ),
+              h(
+                "div",
+                { className: "cg-summary-row cg-summary-counts" },
+                h("span", { className: "cg-summary-item", title: "变更文件" }, "变更 ", h("b", null, quick ? quick.changed || 0 : countChanges(data))),
+                h("span", { className: "cg-summary-item", title: "暂存区" }, "暂存 ", h("b", null, quick ? quick.staged || 0 : data.status.staged.length)),
+                h("span", { className: "cg-summary-item", title: "未暂存" }, "未暂存 ", h("b", null, quick ? quick.unstaged || 0 : data.status.unstaged.length)),
+                h("span", { className: "cg-summary-item", title: "未跟踪" }, "未跟踪 ", h("b", null, quick ? quick.untracked || 0 : data.status.untracked.length)),
+              ),
             ),
           ),
           h(

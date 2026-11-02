@@ -372,6 +372,7 @@ const PLUGIN_CSS = `
 .cg-panel-heading{display:flex;flex-direction:column;gap:1px;min-width:0}
 .cg-panel-heading b{font-size:0.7813rem;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cg-panel-heading span{font-size:0.6563rem;color:var(--color-text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cg-panel-section{flex:none}
 .cg-panel-summary{display:flex;flex-direction:column;gap:0.125rem;padding:0.375rem 0.875rem;border-bottom:1px solid var(--cg-border);line-height:1.35}
 .cg-summary-row{display:flex;align-items:center;gap:0.75rem;min-width:0;font-size:0.6875rem;color:var(--color-text-tertiary)}
 .cg-summary-counts{flex-wrap:wrap;gap:0.125rem 0.875rem}
