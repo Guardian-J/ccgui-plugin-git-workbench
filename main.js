@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.19";
+const PLUGIN_VERSION = "0.2.20";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -6089,6 +6089,8 @@ const PLUGIN_CSS = `
 .cg-section-title{display:flex;align-items:center;gap:0.5rem;padding:0.6875rem 0.875rem;font-weight:650;font-size:0.6875rem;letter-spacing:.04em;color:var(--color-text-tertiary);background:var(--cg-surface-2);border-bottom:1px solid var(--cg-border);position:sticky;top:0;z-index:1}
 .cg-section-toggle{cursor:pointer;user-select:none;-webkit-user-select:none}
 .cg-section-toggle:hover{color:var(--color-text-secondary)}
+.cg-section-actions{display:inline-flex;align-items:center;gap:0.125rem;margin-left:auto}
+.cg-section-actions .cg-iconbtn{width:1.25rem;height:1.25rem;border-radius:0.3125rem}
 
 /* ---------- 控制台 ---------- */
 .cg-console{flex:1;min-height:0;display:flex;flex-direction:column}
@@ -10360,22 +10362,6 @@ function CompactPanel(props) {
         h("b", { className: "cg-ellipsis" }, "Git 面板"),
         h("span", { className: "cg-ellipsis", title: s.workspacePath || "" }, s.workspaceName || s.workspacePath || "未连接工作区"),
       ),
-      h("div", { style: { flex: 1 } }),
-      h(IconBtn, { name: "external", label: "打开全屏 Git 工作台", onClick: () => openWorkbench("changes", repo) }),
-      h(IconBtn, {
-        name: "refresh",
-        label: s.scanning ? "正在扫描仓库…" : data && data.loading.status ? "刷新中…" : "重新扫描仓库并刷新",
-        loading: Boolean(s.scanning || (data && data.loading.status)),
-        disabled: Boolean(s.scanning || (data && data.loading.status)),
-        onClick: async () => {
-          // 面板刷新必须重扫工作区：新克隆/新建/删除的仓库只有扫描才会出现在列表里。
-          await scanWorkspace({ force: true });
-          const target = state.activeRepo || repo;
-          if (target && state.repos.some((item) => pathKey(item.path) === pathKey(target))) {
-            await refreshRepo(target, { quick: true });
-          }
-        },
-      }),
     ),
     h(
       "div",
@@ -10402,6 +10388,26 @@ function CompactPanel(props) {
         h(Icon, { name: reposOpen ? "chevron-down" : "chevron-right", size: 11 }),
         h("span", null, "工作区仓库"),
         h(Badge, null, workspaceRepos.length),
+        h(
+          "span",
+          { className: "cg-section-actions", onClick: (event) => event.stopPropagation(), onKeyDown: (event) => event.stopPropagation() },
+          h(IconBtn, { name: "external", size: 12, label: "打开全屏 Git 工作台", onClick: () => openWorkbench("changes", repo) }),
+          h(IconBtn, {
+            name: "refresh",
+            size: 12,
+            label: s.scanning ? "正在扫描仓库…" : data && data.loading.status ? "刷新中…" : "重新扫描仓库并刷新",
+            loading: Boolean(s.scanning || (data && data.loading.status)),
+            disabled: Boolean(s.scanning || (data && data.loading.status)),
+            onClick: async () => {
+              // 面板刷新必须重扫工作区：新克隆/新建/删除的仓库只有扫描才会出现在列表里。
+              await scanWorkspace({ force: true });
+              const target = state.activeRepo || repo;
+              if (target && state.repos.some((item) => pathKey(item.path) === pathKey(target))) {
+                await refreshRepo(target, { quick: true });
+              }
+            },
+          }),
+        ),
       ),
       !reposOpen
         ? null

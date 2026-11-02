@@ -301,6 +301,8 @@ const PLUGIN_CSS = `
 .cg-section-title{display:flex;align-items:center;gap:0.5rem;padding:0.6875rem 0.875rem;font-weight:650;font-size:0.6875rem;letter-spacing:.04em;color:var(--color-text-tertiary);background:var(--cg-surface-2);border-bottom:1px solid var(--cg-border);position:sticky;top:0;z-index:1}
 .cg-section-toggle{cursor:pointer;user-select:none;-webkit-user-select:none}
 .cg-section-toggle:hover{color:var(--color-text-secondary)}
+.cg-section-actions{display:inline-flex;align-items:center;gap:0.125rem;margin-left:auto}
+.cg-section-actions .cg-iconbtn{width:1.25rem;height:1.25rem;border-radius:0.3125rem}
 
 /* ---------- 控制台 ---------- */
 .cg-console{flex:1;min-height:0;display:flex;flex-direction:column}
