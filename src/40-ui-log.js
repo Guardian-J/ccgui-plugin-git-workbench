@@ -419,6 +419,15 @@ function LogTab(props) {
         h(
           "div",
           { className: "cg-log-scroll" },
+          h(
+            "div",
+            { className: "cg-commit-head" },
+            h("span", { className: "cg-commit-head-label" }, "提交"),
+            h("span", { className: "cg-commit-meta cg-commit-author" }, "作者"),
+            h("span", { className: "cg-commit-meta cg-commit-date" }, "日期"),
+            h("span", { className: "cg-commit-meta cg-commit-time" }, "时间"),
+            h("span", { className: "cg-commit-meta cg-commit-hash" }, "哈希"),
+          ),
           view.commits.map((item, index) =>
             h(CommitRow, {
               key: item.hash,

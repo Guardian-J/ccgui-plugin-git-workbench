@@ -256,7 +256,9 @@ const PLUGIN_CSS = `
 /* ---------- 提交图 ---------- */
 .cg-log{flex:1;min-height:0;display:flex;background:var(--cg-surface)}
 .cg-log-list{flex:0 1 56%;width:auto;min-width:min(18.75rem,45%);max-width:70%;border-right:1px solid var(--cg-border);display:flex;flex-direction:column;min-height:0;container-type:inline-size}
-.cg-log-scroll{flex:1;overflow:auto;min-height:0;padding:2px 0}
+.cg-log-scroll{flex:1;overflow:auto;min-height:0;padding:0 0 2px}
+.cg-commit-head{display:flex;align-items:center;gap:0.625rem;height:1.625rem;padding:0 0.75rem 0 0.5rem;font-size:0.6563rem;font-weight:650;letter-spacing:.04em;color:var(--color-text-tertiary);background:var(--cg-surface);border-bottom:1px solid var(--cg-border);position:sticky;top:0;z-index:1;flex:none}
+.cg-commit-head-label{flex:1;min-width:0}
 .cg-commit-row{display:flex;align-items:center;gap:0.625rem;height:1.875rem;padding:0 0.75rem 0 0.5rem;cursor:pointer;min-width:0;transition:background 100ms ease}
 .cg-commit-row:hover{background:var(--cg-hover)}
 .cg-commit-row.cg-selected{background:var(--cg-accent-soft);box-shadow:inset 2px 0 0 var(--cg-accent)}
