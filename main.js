@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.24";
+const PLUGIN_VERSION = "0.2.25";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -2165,6 +2165,7 @@ const logInflight = new Map();
 let pollTimer = null;
 let pollRefs = 0;
 let pollTask = null;
+let visibilityHandler = null;
 let disposed = false;
 let deferredNotifyTimer = null;
 
@@ -2820,6 +2821,10 @@ async function loadRepoStatus(path, force) {
         if (invalidate) data.statusInvalidate = true;
         return;
       }
+      const previousHead = data.status && data.status.branch
+        ? String(data.status.branch.head || "") + "\u0001" + String(data.status.branch.oid || "")
+        : "";
+      const hasPreviousHead = Boolean(data.status && data.status.branch && data.status.branch.oid);
       const signature = computeStatusSignature(parsed);
       const changed = invalidate || signature !== data.statusSignature || parsed.warnings !== (data.status.warnings || "");
       if (changed) {
@@ -2853,6 +2858,10 @@ async function loadRepoStatus(path, force) {
       if (changed) {
         syncCheckedFiles(key, parsed);
         updateExpandedDirs(key, parsed);
+        const nextHead = parsed.branch
+          ? String(parsed.branch.head || "") + "\u0001" + String(parsed.branch.oid || "")
+          : "";
+        if (hasPreviousHead && nextHead !== previousHead) refreshLogAfterHeadChange(key);
       }
       const selection = state.selectedFile;
       if (selection && pathKey(selection.repo) === pathKey(key)) {
@@ -3208,6 +3217,22 @@ async function loadLog(path, reset, options) {
 
 /* ---------- 工作区轮询 ---------- */
 
+/**
+ * HEAD 或当前分支变化后刷新提交图 / 最近提交。
+ * 用户正在筛选或查看文件历史时保留其浏览上下文，避免列表在阅读过程中
+ * 突然跳回顶部；这些场景仍可手动刷新。
+ */
+function refreshLogAfterHeadChange(repo) {
+  const key = normalizePath(repo);
+  const view = state.logViews[key];
+  if (!view) return;
+  const filter = view.filter || {};
+  if (filter.text || filter.author || filter.path) return;
+  const pageSize = Math.max(20, Math.min(200, Number(state.settings.logPageSize) || PAGE_SIZE));
+  if (view.offset > pageSize) return;
+  void loadLog(key, true).catch(() => undefined);
+}
+
 function startWorkspacePolling() {
   pollRefs += 1;
   if (pollTimer) clearInterval(pollTimer);
@@ -3215,6 +3240,13 @@ function startWorkspacePolling() {
   pollTimer = setInterval(() => {
     void pollWorkspace().catch(() => undefined);
   }, interval);
+  // 窗口从后台恢复时立刻补一次，不必等下一个间隔；隐藏期间的 tick 会直接返回。
+  if (!visibilityHandler && typeof document !== "undefined") {
+    visibilityHandler = () => {
+      if (document.visibilityState === "visible") void pollWorkspace().catch(() => undefined);
+    };
+    document.addEventListener("visibilitychange", visibilityHandler);
+  }
   void pollWorkspace().catch(() => undefined);
 }
 
@@ -3266,6 +3298,10 @@ function stopWorkspacePolling() {
   if (pollRefs > 0) return;
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
+  if (visibilityHandler && typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", visibilityHandler);
+  }
+  visibilityHandler = null;
 }
 
 function disposeStore() {
