@@ -511,7 +511,9 @@ function findScript(excludes, windows) {
       "$out=New-Object System.Collections.Generic.List[string];\n" +
       "function Walk([string]$owner,[string]$d,[int]$lvl){\n" +
       " if($lvl -gt $max){return}\n" +
-      " try{$items=[IO.Directory]::EnumerateFileSystemInfos($d)}catch{return}\n" +
+      // Windows PowerShell 5.1（.NET Framework）只有 DirectoryInfo 实例方法；
+      // 静态 Directory.EnumerateFileSystemInfos 是 .NET Core 才有的 API。
+      " try{$items=([IO.DirectoryInfo]$d).EnumerateFileSystemInfos()}catch{return}\n" +
       " foreach($p in $items){\n" +
       "  try{$n=$p.Name}catch{continue}\n" +
       "  if($n -eq '.git'){$out.Add($owner + [char]0 + $p.FullName);continue}\n" +
