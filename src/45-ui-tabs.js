@@ -334,10 +334,10 @@ function StashesTab(props) {
                   "div",
                   { style: { display: "flex", gap: "0.375rem", width: "100%", alignItems: "center" } },
                   h("span", { className: "cg-muted cg-mini cg-ellipsis", style: { flex: 1 } }, (item.branch ? item.branch + " · " : "") + shortDate(item.at)),
-                  h(IconBtn, { name: "play", label: "应用", size: 12, onClick: (event) => { event.stopPropagation(); stashApply(repo, item.selector, "apply"); } }),
-                  h(IconBtn, { name: "check", label: "应用并删除", size: 12, onClick: (event) => { event.stopPropagation(); stashApply(repo, item.selector, "pop"); } }),
-                  h(IconBtn, { name: "branch", label: "从贮藏新建分支", size: 12, onClick: (event) => { event.stopPropagation(); stashBranch(repo, item.selector); } }),
-                  h(IconBtn, { name: "trash", label: "删除贮藏", size: 12, onClick: (event) => { event.stopPropagation(); stashApply(repo, item.selector, "drop"); } }),
+                  h(IconBtn, { name: "play", label: "应用", size: 12, onClick: (event) => { event.stopPropagation(); return stashApply(repo, item.selector, "apply"); } }),
+                  h(IconBtn, { name: "check", label: "应用并删除", size: 12, onClick: (event) => { event.stopPropagation(); return stashApply(repo, item.selector, "pop"); } }),
+                  h(IconBtn, { name: "branch", label: "从贮藏新建分支", size: 12, onClick: (event) => { event.stopPropagation(); return stashBranch(repo, item.selector); } }),
+                  h(IconBtn, { name: "trash", label: "删除贮藏", size: 12, onClick: (event) => { event.stopPropagation(); return stashApply(repo, item.selector, "drop"); } }),
                 ),
               ),
             )
@@ -1150,8 +1150,8 @@ function CompactPanel(props) {
               h(
                 "div",
                 { className: "cg-seg", role: "group", "aria-label": "文件视图", onClick: (event) => event.stopPropagation() },
-                h("button", { type: "button", className: fileView === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
-                h("button", { type: "button", className: fileView === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
+                h(ActionButton, { className: fileView === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
+                h(ActionButton, { className: fileView === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
               ),
             ),
             changesOpen && checkedCount

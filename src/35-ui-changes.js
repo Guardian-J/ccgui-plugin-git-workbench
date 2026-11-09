@@ -4,7 +4,8 @@
 
 async function syncWorkspaceFromHost(options) {
   try {
-    const meta = await appCtx.workspace.getMetadata();
+    const pendingMeta = options && options.metadata;
+    const meta = pendingMeta ? await pendingMeta : await appCtx.workspace.getMetadata();
     if (meta && meta.path) await setWorkspace(meta.path, options);
   } catch (error) {
     // 宿主未提供工作区时保持空态
@@ -197,8 +198,8 @@ function FileFilterBar(props) {
     h(
       "div",
       { className: "cg-seg", role: "group", "aria-label": "文件视图" },
-      h("button", { type: "button", className: view === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
-      h("button", { type: "button", className: view === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
+      h(ActionButton, { className: view === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
+      h(ActionButton, { className: view === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
     ),
   );
 }
@@ -321,10 +322,9 @@ function ChangeGroup(props) {
               size: 12,
               onClick: () => {
                 if (group.key === "untracked") {
-                  discardPaths(repo, group.entries.map((entry) => Object.assign({}, entry, { code: "?", staged: false })));
-                } else {
-                  discardPaths(repo, group.entries);
+                  return discardPaths(repo, group.entries.map((entry) => Object.assign({}, entry, { code: "?", staged: false })));
                 }
+                return discardPaths(repo, group.entries);
               },
             })
           : null,
@@ -514,10 +514,46 @@ function openContextMenu(x, y, items) {
   notify();
 }
 
-function closeContextMenu() {
+function closeContextMenu(expected) {
+  // 异步动作结束时只关闭仍属于它的菜单，不能关掉用户随后打开的新菜单。
+  if (expected && contextMenuState !== expected) return;
   contextMenuState = null;
   for (const listener of contextMenuListeners) listener();
   notify();
+}
+
+function ContextMenuButton(props) {
+  const h = appCtx.react.createElement;
+  const item = props.item;
+  const menu = props.menu;
+  const activate = () => {
+    if (!item.onClick) {
+      closeContextMenu(menu);
+      return;
+    }
+    const result = item.onClick();
+    if (!result || typeof result.then !== "function") {
+      closeContextMenu(menu);
+      return result;
+    }
+    return Promise.resolve(result).finally(() => closeContextMenu(menu));
+  };
+  return h(
+    ActionButton,
+    {
+      className: item.danger ? "cg-danger" : "",
+      disabled: item.disabled,
+      onClick: activate,
+    },
+    (loading) => [
+      loading
+        ? h(Spinner, { key: "icon", size: 13 })
+        : item.icon
+          ? h(Icon, { key: "icon", name: item.icon, size: 13 })
+          : h("span", { key: "icon", style: { width: "0.8125rem" } }),
+      h("span", { key: "label" }, item.label),
+    ],
+  );
 }
 
 function ContextMenuHost() {
@@ -560,21 +596,7 @@ function ContextMenuHost() {
         ? null
         : item.separator
           ? h("hr", { key: "sep" + index })
-          : h(
-            "button",
-            {
-              key: item.label + index,
-              type: "button",
-              className: item.danger ? "cg-danger" : "",
-              disabled: item.disabled,
-              onClick: () => {
-                closeContextMenu();
-                if (item.onClick) void item.onClick();
-              },
-            },
-            item.icon ? h(Icon, { name: item.icon, size: 13 }) : h("span", { style: { width: "0.8125rem" } }),
-            item.label,
-          ),
+          : h(ContextMenuButton, { key: item.label + index, item, menu }),
     ),
   );
 }
@@ -699,8 +721,8 @@ function FileDiffView(props) {
       h(
         "div",
         { className: "cg-seg", role: "group", "aria-label": "差异布局" },
-        h("button", { type: "button", className: s.settings.diffLayout === "split" ? "" : "cg-on", title: "统一视图", onClick: () => saveSettings({ diffLayout: "unified" }) }, "统一"),
-        h("button", { type: "button", className: s.settings.diffLayout === "split" ? "cg-on" : "", title: "并排视图", onClick: () => saveSettings({ diffLayout: "split" }) }, "并排"),
+        h(ActionButton, { className: s.settings.diffLayout === "split" ? "" : "cg-on", title: "统一视图", onClick: () => saveSettings({ diffLayout: "unified" }) }, "统一"),
+        h(ActionButton, { className: s.settings.diffLayout === "split" ? "cg-on" : "", title: "并排视图", onClick: () => saveSettings({ diffLayout: "split" }) }, "并排"),
       ),
       h(Check, {
         checked: s.ignoreWhitespace,
@@ -875,7 +897,7 @@ function DiffFileBlock(props) {
               confirmLabel: "丢弃",
               danger: true,
             });
-            if (confirmed) void run(hunkIndex, hunk, "discard");
+            if (confirmed) return run(hunkIndex, hunk, "discard");
           },
         }, "丢弃" + suffix),
       );
@@ -1040,9 +1062,7 @@ function CommitBox(props) {
     if (settingKey) void saveSettings({ [settingKey]: Boolean(value) });
     notify();
   };
-  const doCommit = (push) => {
-    void commitChanges(repo, { message, push: Boolean(push || state.commitPush) });
-  };
+  const doCommit = (push) => commitChanges(repo, { message, push: Boolean(push || state.commitPush) });
   return h(
     "div",
     {
@@ -1101,10 +1121,9 @@ function CommitBox(props) {
           s.commitHistory.length
             ? s.commitHistory.map((item, index) =>
                 h(
-                  "button",
+                  ActionButton,
                   {
                     key: index,
-                    type: "button",
                     title: item,
                     onClick: () => {
                       setDraft(repo, item);

@@ -10,13 +10,15 @@ async function refreshRepo(repo, options) {
   ensureRepoData(repo).statusInvalidate = true;
   // 只要侧栏指示（分支与更改计数）时走轻量 status，避免为每个仓库拉完整 diff 状态。
   if (opts.quick && !opts.details && !opts.log) {
-    await loadQuickStatusFor(repo);
+    await loadQuickStatusFor(repo, { force: true });
     return;
   }
-  // loadRepoStatus 成功后会同步 data.quick（分支与计数），无需再单独拉一次 quick。
-  await loadRepoStatus(repo, true);
-  if (opts.details) await loadRepoDetails(repo, true);
-  if (opts.log) await loadLog(repo, true);
+  // 三者读取不同数据，串行只会增加等待；完整 status 同时更新 quick 快照。
+  await Promise.all([
+    loadRepoStatus(repo, true),
+    opts.details ? loadRepoDetails(repo, true) : null,
+    opts.log ? loadLog(repo, true) : null,
+  ]);
 }
 
 /**

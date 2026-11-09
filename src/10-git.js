@@ -511,15 +511,14 @@ function findScript(excludes, windows) {
       "$out=New-Object System.Collections.Generic.List[string];\n" +
       "function Walk([string]$owner,[string]$d,[int]$lvl){\n" +
       " if($lvl -gt $max){return}\n" +
-      " try{$items=[IO.Directory]::EnumerateFileSystemEntries($d)}catch{return}\n" +
+      " try{$items=[IO.Directory]::EnumerateFileSystemInfos($d)}catch{return}\n" +
       " foreach($p in $items){\n" +
-      "  try{$n=[IO.Path]::GetFileName($p)}catch{continue}\n" +
-      "  if($n -eq '.git'){$out.Add($owner + [char]0 + $p);continue}\n" +
-      "  try{$attr=[IO.File]::GetAttributes($p)}catch{continue}\n" +
-      "  if(($attr -band [IO.FileAttributes]::Directory) -eq 0){continue}\n" +
-      "  if(($attr -band [IO.FileAttributes]::ReparsePoint) -ne 0){continue}\n" +
+      "  try{$n=$p.Name}catch{continue}\n" +
+      "  if($n -eq '.git'){$out.Add($owner + [char]0 + $p.FullName);continue}\n" +
+      "  if($p -isnot [IO.DirectoryInfo]){continue}\n" +
       "  if($ex -contains $n){continue}\n" +
-      "  Walk $owner $p ($lvl+1)\n" +
+      "  if(($p.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){continue}\n" +
+      "  if($lvl -lt $max){Walk $owner $p.FullName ($lvl+1)}\n" +
       " }\n" +
       "}\n" +
       "foreach($r in ($env:CCGIT_ROOTS -split \"`n\")){ $t=$r.Trim(); if($t){ Walk $t $t 0 } }\n" +
@@ -680,15 +679,30 @@ async function loadGitVersion(force) {
   return gitVersionRaw;
 }
 
-/** 已登记的侧栏工作区（含 worktree 子行）。只读，用来补全仓库清单。 */
+/** 同一次扫描的深浅阶段共享工作区列表；短暂缓存避免面板与全屏同时初始化时重复请求。 */
+let registeredWorkspacesCache = null;
+let registeredWorkspacesAt = 0;
+let registeredWorkspacesInflight = null;
+
 async function listRegisteredWorkspaces() {
-  try {
-    if (!appCtx.workspaces || typeof appCtx.workspaces.list !== "function") return [];
-    const rows = await appCtx.workspaces.list();
-    return Array.isArray(rows) ? rows : [];
-  } catch (error) {
-    return [];
+  if (registeredWorkspacesCache && Date.now() - registeredWorkspacesAt < 5000) {
+    return registeredWorkspacesCache;
   }
+  if (registeredWorkspacesInflight) return registeredWorkspacesInflight;
+  registeredWorkspacesInflight = (async () => {
+    try {
+      if (!appCtx.workspaces || typeof appCtx.workspaces.list !== "function") return [];
+      const rows = await appCtx.workspaces.list();
+      registeredWorkspacesCache = Array.isArray(rows) ? rows : [];
+      registeredWorkspacesAt = Date.now();
+      return registeredWorkspacesCache;
+    } catch (error) {
+      return [];
+    } finally {
+      registeredWorkspacesInflight = null;
+    }
+  })();
+  return registeredWorkspacesInflight;
 }
 
 /** 收集仓库发现的目标：当前工作区 + 已登记工作区 + 手动仓库，各只出现一次。 */
@@ -750,22 +764,18 @@ async function discoverRepos(workspacePath, settings, options) {
   }
   const targets = Array.isArray(opts.targets) ? opts.targets : await collectRepoTargets(ws);
 
-  // 1) 快速探测：并发 rev-parse，本身就是仓库的路径直接收录，不做目录遍历。
+  // 1) 快速探测与目录遍历互不依赖；首次发现时并行，后台补全阶段才复用探测结果。
+  let probePromise = null;
   if (!opts.skipProbe) {
-    const probed = await probeRepoRoots(
+    probePromise = probeRepoRoots(
       targets.map((target) => target.path),
       { concurrency: 8, timeoutMs: 5000 },
     );
-    const targetByKey = new Map(targets.map((target) => [pathKey(target.path), target]));
-    for (const item of probed) {
-      if (!item.root) continue;
-      const target = targetByKey.get(pathKey(item.path));
-      if (target) add(item.root, target.source, target.owner);
-    }
   }
 
   // 2) 深扫：所有需要补全的根合并成一次 shell 调用。
   const deepTargets = targets.filter((target) => target.source !== "worktree");
+  let scanPromise = null;
   if (opts.deep !== false && deepTargets.length) {
     const metaByRoot = new Map(
       deepTargets.map((target) => [
@@ -773,19 +783,38 @@ async function discoverRepos(workspacePath, settings, options) {
         { source: target.source, owner: target.owner },
       ]),
     );
-    try {
-      const scan = await scanGitRoots(deepTargets.map((target) => target.path), settings);
-      if (scan.truncated) {
-        errors.push("仓库扫描输出达到 64KB 上限，部分仓库可能未列出；请减小扫描深度或增加排除目录。");
-      }
-      for (const item of scan.roots) {
-        const meta = metaByRoot.get(pathKey(item.owner)) || { source: "scan", owner: item.owner };
-        add(item.path, meta.source, meta.owner);
-      }
-    } catch (error) {
-      noteError("扫描工作区", error);
+    scanPromise = scanGitRoots(deepTargets.map((target) => target.path), settings)
+      .then((scan) => {
+        if (scan.truncated) {
+          errors.push("仓库扫描输出达到 64KB 上限，部分仓库可能未列出；请减小扫描深度或增加排除目录。");
+        }
+        for (const item of scan.roots) {
+          const meta = metaByRoot.get(pathKey(item.owner)) || { source: "scan", owner: item.owner };
+          add(item.path, meta.source, meta.owner);
+        }
+      })
+      .catch((error) => { noteError("扫描工作区", error); });
+  }
+
+  if (probePromise) {
+    const probed = await probePromise;
+    const targetByKey = new Map(targets.map((target) => [pathKey(target.path), target]));
+    for (const item of probed) {
+      if (!item.root) continue;
+      const target = targetByKey.get(pathKey(item.path));
+      if (target) add(item.root, target.source, target.owner);
+    }
+    // 供调用方展示首屏；目录扫描继续进行，并复用同一个最终 Promise。
+    if (opts.deep !== false && typeof opts.onQuick === "function") {
+      const quickRepos = Array.from(found.values()).map((item) => Object.assign({}, item, {
+        name: repoDisplayName(item.path, ws),
+        relative: ws ? relativePath(ws, item.path) : item.path,
+        isActiveWorkspaceRepo: ws ? isSubPath(ws, item.path) || pathKey(item.path) === pathKey(ws) : false,
+      }));
+      opts.onQuick(quickRepos);
     }
   }
+  if (scanPromise) await scanPromise;
 
   const repos = Array.from(found.values()).map((item) => {
     const path = item.path;

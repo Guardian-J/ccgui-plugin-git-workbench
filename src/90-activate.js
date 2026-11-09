@@ -56,6 +56,10 @@ function SettingsPage() {
 
 async function ensureWorkspaceForCommand() {
   if (!state.workspacePath || !state.repos.length) await syncWorkspaceFromHost();
+  if (!state.repos.length && state.scanning) {
+    const task = scanInflight.get(pathKey(state.workspacePath));
+    if (task) await task.promise;
+  }
   return state.workspacePath;
 }
 
@@ -159,9 +163,7 @@ function registerGitWorkbench(ctx) {
     key: "git-workbench-refresh",
     title: () => "Git：刷新状态",
     keywords: () => ["git", "refresh", "status"],
-    run: () => {
-      void ensureRepoForCommand().then((repo) => repo && refreshRepo(repo, { details: true }));
-    },
+    run: () => ensureRepoForCommand().then((repo) => repo && refreshRepo(repo, { details: true })),
   }));
   add(ctx.ui.registerCommand({
     key: "git-workbench-fetch",
@@ -320,14 +322,16 @@ export default function activate(ctx) {
     pollTimer = null;
   }
   const dispose = registerGitWorkbench(ctx);
+  // 存储与宿主工作区元数据同时读取，省掉一次串行 IPC。
+  const metadataTask = Promise.resolve().then(() => appCtx.workspace.getMetadata()).catch(() => null);
   void (async () => {
     try {
       await loadSettings();
       if (disposed) return;
-      await syncWorkspaceFromHost();
-      if (disposed) return;
       state.ready = true;
       notify();
+      // 工作区同步可能触发深扫，不能让首屏等它结束。
+      void syncWorkspaceFromHost({ metadata: metadataTask });
     } catch (error) {
       // 热重载期间 appCtx 已被置空，此时不再向用户报错。
       if (!disposed) reportError(error, "Git 插件初始化");

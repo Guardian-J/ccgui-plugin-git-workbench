@@ -511,40 +511,105 @@ function Spinner(props) {
   );
 }
 
+/** 锁先于事件处理函数执行；返回值保留给宿主/测试，Promise 拒绝统一展示错误。 */
+function runGuardedAction(lock, onClick, event, disabled, setPending) {
+  if (lock.current || disabled || !onClick) return;
+  lock.current = true;
+  let result;
+  try {
+    result = onClick(event);
+  } catch (error) {
+    lock.current = false;
+    reportError(error, "操作失败");
+    return;
+  }
+  if (!result || typeof result.then !== "function") {
+    lock.current = false;
+    return result;
+  }
+  if (setPending) setPending(true);
+  return Promise.resolve(result)
+    .catch((error) => { reportError(error, "操作失败"); })
+    .finally(() => {
+      lock.current = false;
+      if (setPending) setPending(false);
+    });
+}
+
+/** ref 在首次事件里同步加锁，不能等 React 渲染 disabled 后才防重。 */
+function useActionPending(onClick, disabled) {
+  const { useState, useRef, useEffect } = appCtx.react;
+  const [pending, setPending] = useState(false);
+  const running = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const update = (value) => { if (mounted.current) setPending(value); };
+  const run = (event) => runGuardedAction(running, onClick, event, disabled, update);
+  return [pending, run];
+}
+
 function Btn(props) {
   const h = appCtx.react.createElement;
+  const [pending, run] = useActionPending(props.onClick, props.disabled || props.loading);
+  const loading = pending || Boolean(props.loading);
   return h(
     "button",
     {
       type: "button",
       className: cx("cg-btn", props.variant ? "cg-" + props.variant : "", props.size === "sm" ? "cg-sm" : "", props.className),
-      onClick: props.onClick,
-      disabled: props.disabled,
+      onClick: run,
+      disabled: props.disabled || loading,
+      "aria-busy": loading || undefined,
       title: props.title,
       style: props.style,
     },
-    props.icon ? h(Icon, { name: props.icon, size: props.iconSize || 13 }) : null,
+    loading ? h(Spinner, { size: props.iconSize || 13 }) : props.icon ? h(Icon, { name: props.icon, size: props.iconSize || 13 }) : null,
     props.children,
   );
 }
 
 function IconBtn(props) {
   const h = appCtx.react.createElement;
+  const [pending, run] = useActionPending(props.onClick, props.disabled || props.loading);
+  const loading = pending || Boolean(props.loading);
   return h(
     "button",
     {
       type: "button",
       className: cx("cg-iconbtn", props.active ? "cg-on" : "", props.className),
-      onClick: props.onClick,
-      disabled: props.disabled,
+      onClick: run,
+      disabled: props.disabled || loading,
+      "aria-busy": loading || undefined,
       title: props.label,
       "aria-label": props.label,
       style: props.style,
     },
-    props.loading
+    loading
       ? h(Spinner, { style: { width: (props.size || 14) + "px", height: (props.size || 14) + "px" } })
       : h(Icon, { name: props.name, size: props.size || 14 }),
   );
+}
+
+function ActionButton(props) {
+  const h = appCtx.react.createElement;
+  const { onClick, disabled, loading, icon, children } = props;
+  const [pending, run] = useActionPending(onClick, disabled || loading);
+  const busy = pending || Boolean(loading);
+  const attributes = Object.assign({ type: "button" }, props, {
+    onClick: run,
+    disabled: disabled || busy,
+    "aria-busy": busy || undefined,
+  });
+  delete attributes.loading;
+  delete attributes.icon;
+  delete attributes.children;
+  const content = typeof children === "function"
+    ? children(busy)
+    : [busy ? h(Spinner, { size: 12 }) : icon ? h(Icon, { name: icon, size: 12 }) : null, children];
+  return h("button", attributes, content);
 }
 
 function Check(props) {
@@ -650,10 +715,9 @@ function TabBar(props) {
     { className: "cg-tabs", role: "tablist" },
     tabs.map((tab) => {
       const node = h(
-        "button",
+        ActionButton,
         {
           key: tab.key,
-          type: "button",
           role: "tab",
           "aria-selected": props.active === tab.key,
           className: cx("cg-tab", tab.sub ? "cg-tab-sub" : "", props.active === tab.key ? "cg-active" : ""),

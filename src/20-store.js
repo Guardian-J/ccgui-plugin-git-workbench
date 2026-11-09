@@ -51,8 +51,10 @@ const toastTimers = new Map();
 let settingsSaveChain = Promise.resolve();
 let mutationQueue = Promise.resolve();
 const statusInflight = new Map();
+const quickInflight = new Map();
 const detailsInflight = new Map();
 const logInflight = new Map();
+const scanInflight = new Map();
 let pollTimer = null;
 let pollRefs = 0;
 let pollTask = null;
@@ -192,43 +194,31 @@ function getSettings() {
 }
 
 async function loadSettings() {
-  let saved = null;
-  try {
-    saved = await appCtx.storage.get("settings");
-  } catch (error) {
-    saved = null;
-    // 读不到旧设置时默认值不可信，后续保存会把默认值写回去覆盖用户配置。
-    state.settingsLoadFailed = true;
-  }
+  // 四项存储互不依赖，串行等待会把首屏时间放大四倍。
+  const [saved, history, manual, cache] = await Promise.all([
+    appCtx.storage.get("settings").catch(() => {
+      // 读不到旧设置时默认值不可信，后续保存会把默认值写回去覆盖用户配置。
+      state.settingsLoadFailed = true;
+      return null;
+    }),
+    appCtx.storage.get("commitHistory").catch(() => null),
+    appCtx.storage.get("manualRepos").catch(() => null),
+    appCtx.storage.get("repoCache").catch(() => null),
+  ]);
   if (saved && typeof saved === "object" && !Array.isArray(saved)) {
     state.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
   }
-  try {
-    const history = await appCtx.storage.get("commitHistory");
-    if (Array.isArray(history)) state.commitHistory = history.filter((item) => typeof item === "string");
-  } catch (error) {
-    // ignore
-  }
-  try {
-    const manual = await appCtx.storage.get("manualRepos");
-    if (manual && typeof manual === "object" && !Array.isArray(manual)) state.manualRepos = manual;
-  } catch (error) {
-    // ignore
-  }
-  try {
-    const cache = await appCtx.storage.get("repoCache");
-    if (cache && typeof cache === "object" && !Array.isArray(cache)) {
-      const now = Date.now();
-      for (const key of Object.keys(cache)) {
-        const entry = cache[key];
-        if (!entry || !Array.isArray(entry.repos)) continue;
-        if (now - (entry.at || 0) > REPO_CACHE_MAX_AGE_MS) continue;
-        state.repoCache[key] = entry;
-      }
-      trimRepoCache();
+  if (Array.isArray(history)) state.commitHistory = history.filter((item) => typeof item === "string");
+  if (manual && typeof manual === "object" && !Array.isArray(manual)) state.manualRepos = manual;
+  if (cache && typeof cache === "object" && !Array.isArray(cache)) {
+    const now = Date.now();
+    for (const key of Object.keys(cache)) {
+      const entry = cache[key];
+      if (!entry || !Array.isArray(entry.repos)) continue;
+      if (now - (entry.at || 0) > REPO_CACHE_MAX_AGE_MS) continue;
+      state.repoCache[key] = entry;
     }
-  } catch (error) {
-    // ignore
+    trimRepoCache();
   }
   state.commitSignOff = Boolean(state.settings.signOff);
   state.commitSkipHooks = Boolean(state.settings.skipHooks);
@@ -432,8 +422,9 @@ function setActiveRepo(path) {
     : null;
   if (!data.expandedDirs || data.expandedDirs.size === 0) data.expandedDirs = new Set();
   notify();
-  void loadRepoStatus(normalized, true);
-  void loadRepoDetails(normalized, true);
+  // 切换仓库先复用内存快照；过期加载在后台进行，不重复强制请求。
+  void loadRepoStatus(normalized);
+  void loadRepoDetails(normalized);
   const logView = getLogView(normalized);
   if (!logView.commits.length) void loadLog(normalized, true);
 }
@@ -462,7 +453,8 @@ async function setWorkspace(path, options) {
     notify();
   }
   if (state.settings.autoScan) {
-    await scanWorkspace();
+    // 先返回并展示缓存/扫描态；深扫在后台继续，按钮通过同一个 Promise 保持 pending。
+    void scanWorkspace();
   } else {
     await loadRootRepoOnly(ws);
   }
@@ -542,10 +534,13 @@ async function saveRepoCache(ws, repos) {
   }
 }
 
-async function scanWorkspace(options) {
+function scanWorkspace(options) {
   const ws = state.workspacePath;
-  if (!ws) return;
+  if (!ws) return Promise.resolve();
   const opts = options || {};
+  const key = pathKey(ws);
+  const running = scanInflight.get(key);
+  if (running && running.token === state.scanToken) return running.promise;
   const cached = cachedRepoEntry(ws);
   // 缓存里没有任何属于当前工作区的仓库时视为过期结果（工作区后来才 git init，
   // 或缓存由旧版本写入），直接重扫，避免面板长期显示空列表。
@@ -564,7 +559,7 @@ async function scanWorkspace(options) {
     void loadQuickStatuses(state.repos);
     state.scanning = false;
     notify();
-    return;
+    return Promise.resolve();
   }
   const token = (state.scanToken || 0) + 1;
   state.scanToken = token;
@@ -572,62 +567,56 @@ async function scanWorkspace(options) {
   state.scanError = null;
   state.scanWarnings = [];
   notify();
-  try {
-    await loadGitVersion();
-    // 阶段一：并发 rev-parse，几百毫秒内先把仓库列表显示出来。
-    const quick = await discoverRepos(ws, state.settings, { deep: false });
-    if (state.scanToken !== token || pathKey(state.workspacePath) !== pathKey(ws)) return;
-    applyDiscoveredRepos(quick.repos);
-    // 阶段一只覆盖「工作区本身或已登记工作区是仓库」的情况。工作区里只有
-    // 子仓库时（如 dc-eam/dc_eam），探测结果全是别的工作区，若此时结束扫描
-    // 会让界面误报「没有 Git 仓库」，因此保持扫描态直到深扫结束。
-    if (quick.repos.some((repo) => repo.isActiveWorkspaceRepo)) state.scanning = false;
-    notify();
-    // 阶段二：目录遍历补全子仓库，后台执行，不阻塞界面。
-    void finishDeepScan(ws, token, quick);
-  } catch (error) {
-    if (state.scanToken !== token) return;
-    state.scanning = false;
-    state.scanError = safeError(error);
-    notify();
-  }
-}
-
-/** 扫描阶段二：复用阶段一的目标与仓库，只做一次批量目录遍历。 */
-async function finishDeepScan(ws, token, quick) {
-  let full;
-  try {
-    full = await discoverRepos(ws, state.settings, {
-      deep: true,
-      targets: quick.targets,
-      seed: quick.repos,
-      skipProbe: true,
-    });
-  } catch (error) {
-    if (state.scanToken !== token || pathKey(state.workspacePath) !== pathKey(ws)) return;
-    state.scanning = false;
-    state.scanWarnings = [safeError(error)];
-    notify();
-    return;
-  }
-  if (state.scanToken !== token || pathKey(state.workspacePath) !== pathKey(ws)) return;
-  const repos = full.repos;
-  state.scanning = false;
-  state.scanWarnings = full.errors;
-  applyDiscoveredRepos(repos);
-  notify();
-  void saveRepoCache(ws, repos);
-  if (state.activeRepo && !repos.some((repo) => pathKey(repo.path) === pathKey(state.activeRepo))) {
-    state.activeRepo = "";
-  }
-  if (!state.activeRepo && repos.length) {
-    const preferred =
-      repos.find((repo) => pathKey(repo.path) === pathKey(ws)) ||
-      repos.find((repo) => repo.isActiveWorkspaceRepo && isSubPath(repo.path, ws)) ||
-      repos[0];
-    setActiveRepo(preferred.path);
-  }
-  void loadQuickStatuses(repos);
+  const task = (async () => {
+    try {
+      // Git 版本、工作区列表、rev-parse 与目录遍历同时开始；首屏不等目录遍历。
+      const versionTask = loadGitVersion();
+      const full = await discoverRepos(ws, state.settings, {
+        deep: true,
+        onQuick: (repos) => {
+          if (state.scanToken !== token || pathKey(state.workspacePath) !== key) return;
+          applyDiscoveredRepos(repos);
+          // 深扫仍在后台补全；扫描按钮的 Promise 会继续等到最终结果。
+          if (repos.some((repo) => repo.isActiveWorkspaceRepo)) state.scanning = false;
+          if (!state.activeRepo && repos.some((repo) => repo.isActiveWorkspaceRepo)) {
+            const preferred = repos.find((repo) => pathKey(repo.path) === key) ||
+              repos.find((repo) => repo.isActiveWorkspaceRepo);
+            setActiveRepo(preferred.path);
+          }
+          notify();
+        },
+      });
+      // Git 版本只用于解析兼容，不能让版本进程拖住仓库列表。
+      void versionTask;
+      if (state.scanToken !== token || pathKey(state.workspacePath) !== key) return;
+      const repos = full.repos;
+      state.scanning = false;
+      state.scanWarnings = full.errors;
+      applyDiscoveredRepos(repos);
+      if (state.activeRepo && !repos.some((repo) => pathKey(repo.path) === pathKey(state.activeRepo))) {
+        state.activeRepo = "";
+      }
+      if (!state.activeRepo && repos.length) {
+        const preferred = repos.find((repo) => pathKey(repo.path) === key) ||
+          repos.find((repo) => repo.isActiveWorkspaceRepo && isSubPath(repo.path, key)) || repos[0];
+        setActiveRepo(preferred.path);
+      }
+      notify();
+      // 缓存写入只影响下次启动，不应让扫描按钮多等一次存储 IPC。
+      void saveRepoCache(ws, repos);
+      // 活动仓库已由完整 status 更新；其它仓库只补缺失/过期摘要。
+      void loadQuickStatuses(repos.filter((repo) => pathKey(repo.path) !== pathKey(state.activeRepo)));
+    } catch (error) {
+      if (state.scanToken !== token || pathKey(state.workspacePath) !== key) return;
+      state.scanning = false;
+      state.scanError = safeError(error);
+      notify();
+    } finally {
+      if (scanInflight.get(key) && scanInflight.get(key).promise === task) scanInflight.delete(key);
+    }
+  })();
+  scanInflight.set(key, { token, promise: task });
+  return task;
 }
 
 async function loadQuickStatuses(repos) {
@@ -648,21 +637,32 @@ async function loadQuickStatuses(repos) {
   await Promise.all(workers);
 }
 
-async function loadQuickStatusFor(path) {
+function loadQuickStatusFor(path, options) {
   const key = normalizePath(path);
+  const force = Boolean(options && options.force);
   const data = ensureRepoData(key);
-  try {
-    const quick = await loadQuickStatus(key);
-    if (!state.repoData[key]) return;
-    data.quick = quick;
-    data.quickAt = Date.now();
-    if (quick.error) data.error = quick.error;
-    notify();
-  } catch (error) {
-    data.quick = { error: safeError(error) };
-    data.quickAt = Date.now();
-    notify();
-  }
+  // 当前仓库的完整 status 会同步 quick 快照，禁止再并行跑同一仓库的轻量 status。
+  if (statusInflight.has(key)) return statusInflight.get(key);
+  if (!force && quickInflight.has(key)) return quickInflight.get(key);
+  if (!force && Date.now() - (data.quickAt || 0) < 5000) return Promise.resolve();
+  const task = (async () => {
+    try {
+      const quick = await loadQuickStatus(key);
+      if (!state.repoData[key]) return;
+      data.quick = quick;
+      data.quickAt = Date.now();
+      if (quick.error) data.error = quick.error;
+      notify();
+    } catch (error) {
+      data.quick = { error: safeError(error) };
+      data.quickAt = Date.now();
+      notify();
+    } finally {
+      if (quickInflight.get(key) === task) quickInflight.delete(key);
+    }
+  })();
+  quickInflight.set(key, task);
+  return task;
 }
 
 /* ---------- 状态加载 ---------- */
@@ -674,8 +674,16 @@ async function loadRepoStatus(path, force) {
   if (!force && Date.now() - data.statusAt < 5000) return;
   if (statusInflight.has(key)) {
     const current = statusInflight.get(key);
-    // 强制刷新必须等旧请求结束后再跑一次，否则会拿到变更前的旧 status。
-    return force ? current.then(() => loadRepoStatus(key, true)) : current;
+    if (!force) return current;
+    // 多个强制刷新共享一次后续请求，避免每个调用者各排队一遍。
+    if (!data.statusFollowUp) {
+      data.statusFollowUp = current.then(() => {
+        data.statusFollowUp = null;
+        // 旧请求结束后再跑一次，确保拿到变更后的 status。
+        return loadRepoStatus(key, true);
+      });
+    }
+    return data.statusFollowUp;
   }
   // statusRequest 只用于丢弃过期请求；statusGeneration 仅在内容变化或写操作要求失效时递增。
   const request = (data.statusRequest || 0) + 1;
@@ -770,7 +778,11 @@ async function loadRepoStatus(path, force) {
         }
       }
       notify();
-      void loadOperations(key).catch(() => undefined);
+      // 内容未变时无需每轮轮询都启动一次 shell 检查操作状态。
+      if (changed || invalidate || Date.now() - (data.operationsAt || 0) >= 15000) {
+        data.operationsAt = Date.now();
+        void loadOperations(key).catch(() => undefined);
+      }
       return changed;
     } catch (error) {
       if (invalidate) data.statusInvalidate = true;
@@ -914,7 +926,17 @@ async function loadOperations(repo) {
 async function loadRepoDetails(path, force) {
   const key = normalizePath(path);
   const data = ensureRepoData(key);
-  if (!force && detailsInflight.has(key)) return detailsInflight.get(key);
+  if (detailsInflight.has(key)) {
+    const current = detailsInflight.get(key);
+    if (!force) return current;
+    if (!data.detailsFollowUp) {
+      data.detailsFollowUp = current.then(() => {
+        data.detailsFollowUp = null;
+        return loadRepoDetails(key, true);
+      });
+    }
+    return data.detailsFollowUp;
+  }
   if (!force && Date.now() - (data.detailsAt || 0) < 15000) return;
   const generation = (data.detailsGeneration || 0) + 1;
   data.detailsGeneration = generation;
@@ -1209,5 +1231,7 @@ function disposeStore() {
   state.dialog = null;
   state.busy = "";
   state.workbenchOpen = false;
+  scanInflight.clear();
+  quickInflight.clear();
   storeListeners.clear();
 }

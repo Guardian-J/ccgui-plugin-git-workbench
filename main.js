@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.25";
+const PLUGIN_VERSION = "0.2.26";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -975,15 +975,14 @@ function findScript(excludes, windows) {
       "$out=New-Object System.Collections.Generic.List[string];\n" +
       "function Walk([string]$owner,[string]$d,[int]$lvl){\n" +
       " if($lvl -gt $max){return}\n" +
-      " try{$items=[IO.Directory]::EnumerateFileSystemEntries($d)}catch{return}\n" +
+      " try{$items=[IO.Directory]::EnumerateFileSystemInfos($d)}catch{return}\n" +
       " foreach($p in $items){\n" +
-      "  try{$n=[IO.Path]::GetFileName($p)}catch{continue}\n" +
-      "  if($n -eq '.git'){$out.Add($owner + [char]0 + $p);continue}\n" +
-      "  try{$attr=[IO.File]::GetAttributes($p)}catch{continue}\n" +
-      "  if(($attr -band [IO.FileAttributes]::Directory) -eq 0){continue}\n" +
-      "  if(($attr -band [IO.FileAttributes]::ReparsePoint) -ne 0){continue}\n" +
+      "  try{$n=$p.Name}catch{continue}\n" +
+      "  if($n -eq '.git'){$out.Add($owner + [char]0 + $p.FullName);continue}\n" +
+      "  if($p -isnot [IO.DirectoryInfo]){continue}\n" +
       "  if($ex -contains $n){continue}\n" +
-      "  Walk $owner $p ($lvl+1)\n" +
+      "  if(($p.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){continue}\n" +
+      "  if($lvl -lt $max){Walk $owner $p.FullName ($lvl+1)}\n" +
       " }\n" +
       "}\n" +
       "foreach($r in ($env:CCGIT_ROOTS -split \"`n\")){ $t=$r.Trim(); if($t){ Walk $t $t 0 } }\n" +
@@ -1144,15 +1143,30 @@ async function loadGitVersion(force) {
   return gitVersionRaw;
 }
 
-/** 已登记的侧栏工作区（含 worktree 子行）。只读，用来补全仓库清单。 */
+/** 同一次扫描的深浅阶段共享工作区列表；短暂缓存避免面板与全屏同时初始化时重复请求。 */
+let registeredWorkspacesCache = null;
+let registeredWorkspacesAt = 0;
+let registeredWorkspacesInflight = null;
+
 async function listRegisteredWorkspaces() {
-  try {
-    if (!appCtx.workspaces || typeof appCtx.workspaces.list !== "function") return [];
-    const rows = await appCtx.workspaces.list();
-    return Array.isArray(rows) ? rows : [];
-  } catch (error) {
-    return [];
+  if (registeredWorkspacesCache && Date.now() - registeredWorkspacesAt < 5000) {
+    return registeredWorkspacesCache;
   }
+  if (registeredWorkspacesInflight) return registeredWorkspacesInflight;
+  registeredWorkspacesInflight = (async () => {
+    try {
+      if (!appCtx.workspaces || typeof appCtx.workspaces.list !== "function") return [];
+      const rows = await appCtx.workspaces.list();
+      registeredWorkspacesCache = Array.isArray(rows) ? rows : [];
+      registeredWorkspacesAt = Date.now();
+      return registeredWorkspacesCache;
+    } catch (error) {
+      return [];
+    } finally {
+      registeredWorkspacesInflight = null;
+    }
+  })();
+  return registeredWorkspacesInflight;
 }
 
 /** 收集仓库发现的目标：当前工作区 + 已登记工作区 + 手动仓库，各只出现一次。 */
@@ -1214,22 +1228,18 @@ async function discoverRepos(workspacePath, settings, options) {
   }
   const targets = Array.isArray(opts.targets) ? opts.targets : await collectRepoTargets(ws);
 
-  // 1) 快速探测：并发 rev-parse，本身就是仓库的路径直接收录，不做目录遍历。
+  // 1) 快速探测与目录遍历互不依赖；首次发现时并行，后台补全阶段才复用探测结果。
+  let probePromise = null;
   if (!opts.skipProbe) {
-    const probed = await probeRepoRoots(
+    probePromise = probeRepoRoots(
       targets.map((target) => target.path),
       { concurrency: 8, timeoutMs: 5000 },
     );
-    const targetByKey = new Map(targets.map((target) => [pathKey(target.path), target]));
-    for (const item of probed) {
-      if (!item.root) continue;
-      const target = targetByKey.get(pathKey(item.path));
-      if (target) add(item.root, target.source, target.owner);
-    }
   }
 
   // 2) 深扫：所有需要补全的根合并成一次 shell 调用。
   const deepTargets = targets.filter((target) => target.source !== "worktree");
+  let scanPromise = null;
   if (opts.deep !== false && deepTargets.length) {
     const metaByRoot = new Map(
       deepTargets.map((target) => [
@@ -1237,19 +1247,38 @@ async function discoverRepos(workspacePath, settings, options) {
         { source: target.source, owner: target.owner },
       ]),
     );
-    try {
-      const scan = await scanGitRoots(deepTargets.map((target) => target.path), settings);
-      if (scan.truncated) {
-        errors.push("仓库扫描输出达到 64KB 上限，部分仓库可能未列出；请减小扫描深度或增加排除目录。");
-      }
-      for (const item of scan.roots) {
-        const meta = metaByRoot.get(pathKey(item.owner)) || { source: "scan", owner: item.owner };
-        add(item.path, meta.source, meta.owner);
-      }
-    } catch (error) {
-      noteError("扫描工作区", error);
+    scanPromise = scanGitRoots(deepTargets.map((target) => target.path), settings)
+      .then((scan) => {
+        if (scan.truncated) {
+          errors.push("仓库扫描输出达到 64KB 上限，部分仓库可能未列出；请减小扫描深度或增加排除目录。");
+        }
+        for (const item of scan.roots) {
+          const meta = metaByRoot.get(pathKey(item.owner)) || { source: "scan", owner: item.owner };
+          add(item.path, meta.source, meta.owner);
+        }
+      })
+      .catch((error) => { noteError("扫描工作区", error); });
+  }
+
+  if (probePromise) {
+    const probed = await probePromise;
+    const targetByKey = new Map(targets.map((target) => [pathKey(target.path), target]));
+    for (const item of probed) {
+      if (!item.root) continue;
+      const target = targetByKey.get(pathKey(item.path));
+      if (target) add(item.root, target.source, target.owner);
+    }
+    // 供调用方展示首屏；目录扫描继续进行，并复用同一个最终 Promise。
+    if (opts.deep !== false && typeof opts.onQuick === "function") {
+      const quickRepos = Array.from(found.values()).map((item) => Object.assign({}, item, {
+        name: repoDisplayName(item.path, ws),
+        relative: ws ? relativePath(ws, item.path) : item.path,
+        isActiveWorkspaceRepo: ws ? isSubPath(ws, item.path) || pathKey(item.path) === pathKey(ws) : false,
+      }));
+      opts.onQuick(quickRepos);
     }
   }
+  if (scanPromise) await scanPromise;
 
   const repos = Array.from(found.values()).map((item) => {
     const path = item.path;
@@ -2160,8 +2189,10 @@ const toastTimers = new Map();
 let settingsSaveChain = Promise.resolve();
 let mutationQueue = Promise.resolve();
 const statusInflight = new Map();
+const quickInflight = new Map();
 const detailsInflight = new Map();
 const logInflight = new Map();
+const scanInflight = new Map();
 let pollTimer = null;
 let pollRefs = 0;
 let pollTask = null;
@@ -2301,43 +2332,31 @@ function getSettings() {
 }
 
 async function loadSettings() {
-  let saved = null;
-  try {
-    saved = await appCtx.storage.get("settings");
-  } catch (error) {
-    saved = null;
-    // 读不到旧设置时默认值不可信，后续保存会把默认值写回去覆盖用户配置。
-    state.settingsLoadFailed = true;
-  }
+  // 四项存储互不依赖，串行等待会把首屏时间放大四倍。
+  const [saved, history, manual, cache] = await Promise.all([
+    appCtx.storage.get("settings").catch(() => {
+      // 读不到旧设置时默认值不可信，后续保存会把默认值写回去覆盖用户配置。
+      state.settingsLoadFailed = true;
+      return null;
+    }),
+    appCtx.storage.get("commitHistory").catch(() => null),
+    appCtx.storage.get("manualRepos").catch(() => null),
+    appCtx.storage.get("repoCache").catch(() => null),
+  ]);
   if (saved && typeof saved === "object" && !Array.isArray(saved)) {
     state.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
   }
-  try {
-    const history = await appCtx.storage.get("commitHistory");
-    if (Array.isArray(history)) state.commitHistory = history.filter((item) => typeof item === "string");
-  } catch (error) {
-    // ignore
-  }
-  try {
-    const manual = await appCtx.storage.get("manualRepos");
-    if (manual && typeof manual === "object" && !Array.isArray(manual)) state.manualRepos = manual;
-  } catch (error) {
-    // ignore
-  }
-  try {
-    const cache = await appCtx.storage.get("repoCache");
-    if (cache && typeof cache === "object" && !Array.isArray(cache)) {
-      const now = Date.now();
-      for (const key of Object.keys(cache)) {
-        const entry = cache[key];
-        if (!entry || !Array.isArray(entry.repos)) continue;
-        if (now - (entry.at || 0) > REPO_CACHE_MAX_AGE_MS) continue;
-        state.repoCache[key] = entry;
-      }
-      trimRepoCache();
+  if (Array.isArray(history)) state.commitHistory = history.filter((item) => typeof item === "string");
+  if (manual && typeof manual === "object" && !Array.isArray(manual)) state.manualRepos = manual;
+  if (cache && typeof cache === "object" && !Array.isArray(cache)) {
+    const now = Date.now();
+    for (const key of Object.keys(cache)) {
+      const entry = cache[key];
+      if (!entry || !Array.isArray(entry.repos)) continue;
+      if (now - (entry.at || 0) > REPO_CACHE_MAX_AGE_MS) continue;
+      state.repoCache[key] = entry;
     }
-  } catch (error) {
-    // ignore
+    trimRepoCache();
   }
   state.commitSignOff = Boolean(state.settings.signOff);
   state.commitSkipHooks = Boolean(state.settings.skipHooks);
@@ -2541,8 +2560,9 @@ function setActiveRepo(path) {
     : null;
   if (!data.expandedDirs || data.expandedDirs.size === 0) data.expandedDirs = new Set();
   notify();
-  void loadRepoStatus(normalized, true);
-  void loadRepoDetails(normalized, true);
+  // 切换仓库先复用内存快照；过期加载在后台进行，不重复强制请求。
+  void loadRepoStatus(normalized);
+  void loadRepoDetails(normalized);
   const logView = getLogView(normalized);
   if (!logView.commits.length) void loadLog(normalized, true);
 }
@@ -2571,7 +2591,8 @@ async function setWorkspace(path, options) {
     notify();
   }
   if (state.settings.autoScan) {
-    await scanWorkspace();
+    // 先返回并展示缓存/扫描态；深扫在后台继续，按钮通过同一个 Promise 保持 pending。
+    void scanWorkspace();
   } else {
     await loadRootRepoOnly(ws);
   }
@@ -2651,10 +2672,13 @@ async function saveRepoCache(ws, repos) {
   }
 }
 
-async function scanWorkspace(options) {
+function scanWorkspace(options) {
   const ws = state.workspacePath;
-  if (!ws) return;
+  if (!ws) return Promise.resolve();
   const opts = options || {};
+  const key = pathKey(ws);
+  const running = scanInflight.get(key);
+  if (running && running.token === state.scanToken) return running.promise;
   const cached = cachedRepoEntry(ws);
   // 缓存里没有任何属于当前工作区的仓库时视为过期结果（工作区后来才 git init，
   // 或缓存由旧版本写入），直接重扫，避免面板长期显示空列表。
@@ -2673,7 +2697,7 @@ async function scanWorkspace(options) {
     void loadQuickStatuses(state.repos);
     state.scanning = false;
     notify();
-    return;
+    return Promise.resolve();
   }
   const token = (state.scanToken || 0) + 1;
   state.scanToken = token;
@@ -2681,62 +2705,56 @@ async function scanWorkspace(options) {
   state.scanError = null;
   state.scanWarnings = [];
   notify();
-  try {
-    await loadGitVersion();
-    // 阶段一：并发 rev-parse，几百毫秒内先把仓库列表显示出来。
-    const quick = await discoverRepos(ws, state.settings, { deep: false });
-    if (state.scanToken !== token || pathKey(state.workspacePath) !== pathKey(ws)) return;
-    applyDiscoveredRepos(quick.repos);
-    // 阶段一只覆盖「工作区本身或已登记工作区是仓库」的情况。工作区里只有
-    // 子仓库时（如 dc-eam/dc_eam），探测结果全是别的工作区，若此时结束扫描
-    // 会让界面误报「没有 Git 仓库」，因此保持扫描态直到深扫结束。
-    if (quick.repos.some((repo) => repo.isActiveWorkspaceRepo)) state.scanning = false;
-    notify();
-    // 阶段二：目录遍历补全子仓库，后台执行，不阻塞界面。
-    void finishDeepScan(ws, token, quick);
-  } catch (error) {
-    if (state.scanToken !== token) return;
-    state.scanning = false;
-    state.scanError = safeError(error);
-    notify();
-  }
-}
-
-/** 扫描阶段二：复用阶段一的目标与仓库，只做一次批量目录遍历。 */
-async function finishDeepScan(ws, token, quick) {
-  let full;
-  try {
-    full = await discoverRepos(ws, state.settings, {
-      deep: true,
-      targets: quick.targets,
-      seed: quick.repos,
-      skipProbe: true,
-    });
-  } catch (error) {
-    if (state.scanToken !== token || pathKey(state.workspacePath) !== pathKey(ws)) return;
-    state.scanning = false;
-    state.scanWarnings = [safeError(error)];
-    notify();
-    return;
-  }
-  if (state.scanToken !== token || pathKey(state.workspacePath) !== pathKey(ws)) return;
-  const repos = full.repos;
-  state.scanning = false;
-  state.scanWarnings = full.errors;
-  applyDiscoveredRepos(repos);
-  notify();
-  void saveRepoCache(ws, repos);
-  if (state.activeRepo && !repos.some((repo) => pathKey(repo.path) === pathKey(state.activeRepo))) {
-    state.activeRepo = "";
-  }
-  if (!state.activeRepo && repos.length) {
-    const preferred =
-      repos.find((repo) => pathKey(repo.path) === pathKey(ws)) ||
-      repos.find((repo) => repo.isActiveWorkspaceRepo && isSubPath(repo.path, ws)) ||
-      repos[0];
-    setActiveRepo(preferred.path);
-  }
-  void loadQuickStatuses(repos);
+  const task = (async () => {
+    try {
+      // Git 版本、工作区列表、rev-parse 与目录遍历同时开始；首屏不等目录遍历。
+      const versionTask = loadGitVersion();
+      const full = await discoverRepos(ws, state.settings, {
+        deep: true,
+        onQuick: (repos) => {
+          if (state.scanToken !== token || pathKey(state.workspacePath) !== key) return;
+          applyDiscoveredRepos(repos);
+          // 深扫仍在后台补全；扫描按钮的 Promise 会继续等到最终结果。
+          if (repos.some((repo) => repo.isActiveWorkspaceRepo)) state.scanning = false;
+          if (!state.activeRepo && repos.some((repo) => repo.isActiveWorkspaceRepo)) {
+            const preferred = repos.find((repo) => pathKey(repo.path) === key) ||
+              repos.find((repo) => repo.isActiveWorkspaceRepo);
+            setActiveRepo(preferred.path);
+          }
+          notify();
+        },
+      });
+      // Git 版本只用于解析兼容，不能让版本进程拖住仓库列表。
+      void versionTask;
+      if (state.scanToken !== token || pathKey(state.workspacePath) !== key) return;
+      const repos = full.repos;
+      state.scanning = false;
+      state.scanWarnings = full.errors;
+      applyDiscoveredRepos(repos);
+      if (state.activeRepo && !repos.some((repo) => pathKey(repo.path) === pathKey(state.activeRepo))) {
+        state.activeRepo = "";
+      }
+      if (!state.activeRepo && repos.length) {
+        const preferred = repos.find((repo) => pathKey(repo.path) === key) ||
+          repos.find((repo) => repo.isActiveWorkspaceRepo && isSubPath(repo.path, key)) || repos[0];
+        setActiveRepo(preferred.path);
+      }
+      notify();
+      // 缓存写入只影响下次启动，不应让扫描按钮多等一次存储 IPC。
+      void saveRepoCache(ws, repos);
+      // 活动仓库已由完整 status 更新；其它仓库只补缺失/过期摘要。
+      void loadQuickStatuses(repos.filter((repo) => pathKey(repo.path) !== pathKey(state.activeRepo)));
+    } catch (error) {
+      if (state.scanToken !== token || pathKey(state.workspacePath) !== key) return;
+      state.scanning = false;
+      state.scanError = safeError(error);
+      notify();
+    } finally {
+      if (scanInflight.get(key) && scanInflight.get(key).promise === task) scanInflight.delete(key);
+    }
+  })();
+  scanInflight.set(key, { token, promise: task });
+  return task;
 }
 
 async function loadQuickStatuses(repos) {
@@ -2757,21 +2775,32 @@ async function loadQuickStatuses(repos) {
   await Promise.all(workers);
 }
 
-async function loadQuickStatusFor(path) {
+function loadQuickStatusFor(path, options) {
   const key = normalizePath(path);
+  const force = Boolean(options && options.force);
   const data = ensureRepoData(key);
-  try {
-    const quick = await loadQuickStatus(key);
-    if (!state.repoData[key]) return;
-    data.quick = quick;
-    data.quickAt = Date.now();
-    if (quick.error) data.error = quick.error;
-    notify();
-  } catch (error) {
-    data.quick = { error: safeError(error) };
-    data.quickAt = Date.now();
-    notify();
-  }
+  // 当前仓库的完整 status 会同步 quick 快照，禁止再并行跑同一仓库的轻量 status。
+  if (statusInflight.has(key)) return statusInflight.get(key);
+  if (!force && quickInflight.has(key)) return quickInflight.get(key);
+  if (!force && Date.now() - (data.quickAt || 0) < 5000) return Promise.resolve();
+  const task = (async () => {
+    try {
+      const quick = await loadQuickStatus(key);
+      if (!state.repoData[key]) return;
+      data.quick = quick;
+      data.quickAt = Date.now();
+      if (quick.error) data.error = quick.error;
+      notify();
+    } catch (error) {
+      data.quick = { error: safeError(error) };
+      data.quickAt = Date.now();
+      notify();
+    } finally {
+      if (quickInflight.get(key) === task) quickInflight.delete(key);
+    }
+  })();
+  quickInflight.set(key, task);
+  return task;
 }
 
 /* ---------- 状态加载 ---------- */
@@ -2783,8 +2812,16 @@ async function loadRepoStatus(path, force) {
   if (!force && Date.now() - data.statusAt < 5000) return;
   if (statusInflight.has(key)) {
     const current = statusInflight.get(key);
-    // 强制刷新必须等旧请求结束后再跑一次，否则会拿到变更前的旧 status。
-    return force ? current.then(() => loadRepoStatus(key, true)) : current;
+    if (!force) return current;
+    // 多个强制刷新共享一次后续请求，避免每个调用者各排队一遍。
+    if (!data.statusFollowUp) {
+      data.statusFollowUp = current.then(() => {
+        data.statusFollowUp = null;
+        // 旧请求结束后再跑一次，确保拿到变更后的 status。
+        return loadRepoStatus(key, true);
+      });
+    }
+    return data.statusFollowUp;
   }
   // statusRequest 只用于丢弃过期请求；statusGeneration 仅在内容变化或写操作要求失效时递增。
   const request = (data.statusRequest || 0) + 1;
@@ -2879,7 +2916,11 @@ async function loadRepoStatus(path, force) {
         }
       }
       notify();
-      void loadOperations(key).catch(() => undefined);
+      // 内容未变时无需每轮轮询都启动一次 shell 检查操作状态。
+      if (changed || invalidate || Date.now() - (data.operationsAt || 0) >= 15000) {
+        data.operationsAt = Date.now();
+        void loadOperations(key).catch(() => undefined);
+      }
       return changed;
     } catch (error) {
       if (invalidate) data.statusInvalidate = true;
@@ -3023,7 +3064,17 @@ async function loadOperations(repo) {
 async function loadRepoDetails(path, force) {
   const key = normalizePath(path);
   const data = ensureRepoData(key);
-  if (!force && detailsInflight.has(key)) return detailsInflight.get(key);
+  if (detailsInflight.has(key)) {
+    const current = detailsInflight.get(key);
+    if (!force) return current;
+    if (!data.detailsFollowUp) {
+      data.detailsFollowUp = current.then(() => {
+        data.detailsFollowUp = null;
+        return loadRepoDetails(key, true);
+      });
+    }
+    return data.detailsFollowUp;
+  }
   if (!force && Date.now() - (data.detailsAt || 0) < 15000) return;
   const generation = (data.detailsGeneration || 0) + 1;
   data.detailsGeneration = generation;
@@ -3318,6 +3369,8 @@ function disposeStore() {
   state.dialog = null;
   state.busy = "";
   state.workbenchOpen = false;
+  scanInflight.clear();
+  quickInflight.clear();
   storeListeners.clear();
 }
 
@@ -3335,13 +3388,15 @@ async function refreshRepo(repo, options) {
   ensureRepoData(repo).statusInvalidate = true;
   // 只要侧栏指示（分支与更改计数）时走轻量 status，避免为每个仓库拉完整 diff 状态。
   if (opts.quick && !opts.details && !opts.log) {
-    await loadQuickStatusFor(repo);
+    await loadQuickStatusFor(repo, { force: true });
     return;
   }
-  // loadRepoStatus 成功后会同步 data.quick（分支与计数），无需再单独拉一次 quick。
-  await loadRepoStatus(repo, true);
-  if (opts.details) await loadRepoDetails(repo, true);
-  if (opts.log) await loadLog(repo, true);
+  // 三者读取不同数据，串行只会增加等待；完整 status 同时更新 quick 快照。
+  await Promise.all([
+    loadRepoStatus(repo, true),
+    opts.details ? loadRepoDetails(repo, true) : null,
+    opts.log ? loadLog(repo, true) : null,
+  ]);
 }
 
 /**
@@ -6366,40 +6421,105 @@ function Spinner(props) {
   );
 }
 
+/** 锁先于事件处理函数执行；返回值保留给宿主/测试，Promise 拒绝统一展示错误。 */
+function runGuardedAction(lock, onClick, event, disabled, setPending) {
+  if (lock.current || disabled || !onClick) return;
+  lock.current = true;
+  let result;
+  try {
+    result = onClick(event);
+  } catch (error) {
+    lock.current = false;
+    reportError(error, "操作失败");
+    return;
+  }
+  if (!result || typeof result.then !== "function") {
+    lock.current = false;
+    return result;
+  }
+  if (setPending) setPending(true);
+  return Promise.resolve(result)
+    .catch((error) => { reportError(error, "操作失败"); })
+    .finally(() => {
+      lock.current = false;
+      if (setPending) setPending(false);
+    });
+}
+
+/** ref 在首次事件里同步加锁，不能等 React 渲染 disabled 后才防重。 */
+function useActionPending(onClick, disabled) {
+  const { useState, useRef, useEffect } = appCtx.react;
+  const [pending, setPending] = useState(false);
+  const running = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const update = (value) => { if (mounted.current) setPending(value); };
+  const run = (event) => runGuardedAction(running, onClick, event, disabled, update);
+  return [pending, run];
+}
+
 function Btn(props) {
   const h = appCtx.react.createElement;
+  const [pending, run] = useActionPending(props.onClick, props.disabled || props.loading);
+  const loading = pending || Boolean(props.loading);
   return h(
     "button",
     {
       type: "button",
       className: cx("cg-btn", props.variant ? "cg-" + props.variant : "", props.size === "sm" ? "cg-sm" : "", props.className),
-      onClick: props.onClick,
-      disabled: props.disabled,
+      onClick: run,
+      disabled: props.disabled || loading,
+      "aria-busy": loading || undefined,
       title: props.title,
       style: props.style,
     },
-    props.icon ? h(Icon, { name: props.icon, size: props.iconSize || 13 }) : null,
+    loading ? h(Spinner, { size: props.iconSize || 13 }) : props.icon ? h(Icon, { name: props.icon, size: props.iconSize || 13 }) : null,
     props.children,
   );
 }
 
 function IconBtn(props) {
   const h = appCtx.react.createElement;
+  const [pending, run] = useActionPending(props.onClick, props.disabled || props.loading);
+  const loading = pending || Boolean(props.loading);
   return h(
     "button",
     {
       type: "button",
       className: cx("cg-iconbtn", props.active ? "cg-on" : "", props.className),
-      onClick: props.onClick,
-      disabled: props.disabled,
+      onClick: run,
+      disabled: props.disabled || loading,
+      "aria-busy": loading || undefined,
       title: props.label,
       "aria-label": props.label,
       style: props.style,
     },
-    props.loading
+    loading
       ? h(Spinner, { style: { width: (props.size || 14) + "px", height: (props.size || 14) + "px" } })
       : h(Icon, { name: props.name, size: props.size || 14 }),
   );
+}
+
+function ActionButton(props) {
+  const h = appCtx.react.createElement;
+  const { onClick, disabled, loading, icon, children } = props;
+  const [pending, run] = useActionPending(onClick, disabled || loading);
+  const busy = pending || Boolean(loading);
+  const attributes = Object.assign({ type: "button" }, props, {
+    onClick: run,
+    disabled: disabled || busy,
+    "aria-busy": busy || undefined,
+  });
+  delete attributes.loading;
+  delete attributes.icon;
+  delete attributes.children;
+  const content = typeof children === "function"
+    ? children(busy)
+    : [busy ? h(Spinner, { size: 12 }) : icon ? h(Icon, { name: icon, size: 12 }) : null, children];
+  return h("button", attributes, content);
 }
 
 function Check(props) {
@@ -6505,10 +6625,9 @@ function TabBar(props) {
     { className: "cg-tabs", role: "tablist" },
     tabs.map((tab) => {
       const node = h(
-        "button",
+        ActionButton,
         {
           key: tab.key,
-          type: "button",
           role: "tab",
           "aria-selected": props.active === tab.key,
           className: cx("cg-tab", tab.sub ? "cg-tab-sub" : "", props.active === tab.key ? "cg-active" : ""),
@@ -7005,24 +7124,28 @@ function RepoRail() {
     const active = pathKey(s.activeRepo) === pathKey(repo.path);
     const rel = relativePath(repo.workspace || s.workspacePath, repo.path);
     return h(
-      "button",
+      ActionButton,
       {
         key: repo.path,
-        type: "button",
         className: cx("cg-repo", active ? "cg-active" : ""),
+        loading: active && Boolean(data && (data.loading.status || data.loading.details)),
         onClick: () => setActiveRepo(repo.path),
         title: repo.path + (rel && rel !== repo.path ? "\n" + rel : ""),
       },
-      h(Icon, { name: repo.worktree ? "archive" : "git", size: 13, className: "cg-repo-icon" }),
-      h(
-        "span",
-        { className: "cg-repo-main" },
-        h("span", { className: "cg-repo-name" }, repoDisplayName(repo.path)),
-        branch && (branch.head || branch.detached)
-          ? h("span", { className: "cg-repo-sub cg-mono" }, branch.detached ? "游离 HEAD" : branch.head)
-          : null,
-      ),
-      dirty ? h("span", { className: "cg-repo-dirty", title: dirty + " 处更改" }, dirty) : null,
+      (loading) => [
+        loading
+          ? h(Spinner, { key: "icon", size: 13, style: { flex: "none" } })
+          : h(Icon, { key: "icon", name: repo.worktree ? "archive" : "git", size: 13, className: "cg-repo-icon" }),
+        h(
+          "span",
+          { className: "cg-repo-main", key: "main" },
+          h("span", { className: "cg-repo-name" }, repoDisplayName(repo.path)),
+          branch && (branch.head || branch.detached)
+            ? h("span", { className: "cg-repo-sub cg-mono" }, branch.detached ? "游离 HEAD" : branch.head)
+            : null,
+        ),
+        dirty ? h("span", { className: "cg-repo-dirty", key: "dirty", title: dirty + " 处更改" }, dirty) : null,
+      ],
     );
   };
   const rows = [];
@@ -7210,7 +7333,8 @@ function WorkbenchStatusBar() {
 
 async function syncWorkspaceFromHost(options) {
   try {
-    const meta = await appCtx.workspace.getMetadata();
+    const pendingMeta = options && options.metadata;
+    const meta = pendingMeta ? await pendingMeta : await appCtx.workspace.getMetadata();
     if (meta && meta.path) await setWorkspace(meta.path, options);
   } catch (error) {
     // 宿主未提供工作区时保持空态
@@ -7403,8 +7527,8 @@ function FileFilterBar(props) {
     h(
       "div",
       { className: "cg-seg", role: "group", "aria-label": "文件视图" },
-      h("button", { type: "button", className: view === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
-      h("button", { type: "button", className: view === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
+      h(ActionButton, { className: view === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
+      h(ActionButton, { className: view === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
     ),
   );
 }
@@ -7527,10 +7651,9 @@ function ChangeGroup(props) {
               size: 12,
               onClick: () => {
                 if (group.key === "untracked") {
-                  discardPaths(repo, group.entries.map((entry) => Object.assign({}, entry, { code: "?", staged: false })));
-                } else {
-                  discardPaths(repo, group.entries);
+                  return discardPaths(repo, group.entries.map((entry) => Object.assign({}, entry, { code: "?", staged: false })));
                 }
+                return discardPaths(repo, group.entries);
               },
             })
           : null,
@@ -7720,10 +7843,46 @@ function openContextMenu(x, y, items) {
   notify();
 }
 
-function closeContextMenu() {
+function closeContextMenu(expected) {
+  // 异步动作结束时只关闭仍属于它的菜单，不能关掉用户随后打开的新菜单。
+  if (expected && contextMenuState !== expected) return;
   contextMenuState = null;
   for (const listener of contextMenuListeners) listener();
   notify();
+}
+
+function ContextMenuButton(props) {
+  const h = appCtx.react.createElement;
+  const item = props.item;
+  const menu = props.menu;
+  const activate = () => {
+    if (!item.onClick) {
+      closeContextMenu(menu);
+      return;
+    }
+    const result = item.onClick();
+    if (!result || typeof result.then !== "function") {
+      closeContextMenu(menu);
+      return result;
+    }
+    return Promise.resolve(result).finally(() => closeContextMenu(menu));
+  };
+  return h(
+    ActionButton,
+    {
+      className: item.danger ? "cg-danger" : "",
+      disabled: item.disabled,
+      onClick: activate,
+    },
+    (loading) => [
+      loading
+        ? h(Spinner, { key: "icon", size: 13 })
+        : item.icon
+          ? h(Icon, { key: "icon", name: item.icon, size: 13 })
+          : h("span", { key: "icon", style: { width: "0.8125rem" } }),
+      h("span", { key: "label" }, item.label),
+    ],
+  );
 }
 
 function ContextMenuHost() {
@@ -7766,21 +7925,7 @@ function ContextMenuHost() {
         ? null
         : item.separator
           ? h("hr", { key: "sep" + index })
-          : h(
-            "button",
-            {
-              key: item.label + index,
-              type: "button",
-              className: item.danger ? "cg-danger" : "",
-              disabled: item.disabled,
-              onClick: () => {
-                closeContextMenu();
-                if (item.onClick) void item.onClick();
-              },
-            },
-            item.icon ? h(Icon, { name: item.icon, size: 13 }) : h("span", { style: { width: "0.8125rem" } }),
-            item.label,
-          ),
+          : h(ContextMenuButton, { key: item.label + index, item, menu }),
     ),
   );
 }
@@ -7905,8 +8050,8 @@ function FileDiffView(props) {
       h(
         "div",
         { className: "cg-seg", role: "group", "aria-label": "差异布局" },
-        h("button", { type: "button", className: s.settings.diffLayout === "split" ? "" : "cg-on", title: "统一视图", onClick: () => saveSettings({ diffLayout: "unified" }) }, "统一"),
-        h("button", { type: "button", className: s.settings.diffLayout === "split" ? "cg-on" : "", title: "并排视图", onClick: () => saveSettings({ diffLayout: "split" }) }, "并排"),
+        h(ActionButton, { className: s.settings.diffLayout === "split" ? "" : "cg-on", title: "统一视图", onClick: () => saveSettings({ diffLayout: "unified" }) }, "统一"),
+        h(ActionButton, { className: s.settings.diffLayout === "split" ? "cg-on" : "", title: "并排视图", onClick: () => saveSettings({ diffLayout: "split" }) }, "并排"),
       ),
       h(Check, {
         checked: s.ignoreWhitespace,
@@ -8081,7 +8226,7 @@ function DiffFileBlock(props) {
               confirmLabel: "丢弃",
               danger: true,
             });
-            if (confirmed) void run(hunkIndex, hunk, "discard");
+            if (confirmed) return run(hunkIndex, hunk, "discard");
           },
         }, "丢弃" + suffix),
       );
@@ -8246,9 +8391,7 @@ function CommitBox(props) {
     if (settingKey) void saveSettings({ [settingKey]: Boolean(value) });
     notify();
   };
-  const doCommit = (push) => {
-    void commitChanges(repo, { message, push: Boolean(push || state.commitPush) });
-  };
+  const doCommit = (push) => commitChanges(repo, { message, push: Boolean(push || state.commitPush) });
   return h(
     "div",
     {
@@ -8307,10 +8450,9 @@ function CommitBox(props) {
           s.commitHistory.length
             ? s.commitHistory.map((item, index) =>
                 h(
-                  "button",
+                  ActionButton,
                   {
                     key: index,
-                    type: "button",
                     title: item,
                     onClick: () => {
                       setDraft(repo, item);
@@ -9085,15 +9227,14 @@ function CommitDetail(props) {
           (commit.parents || []).length
             ? commit.parents.map((parent, index) =>
                 h(
-                  "button",
+                  ActionButton,
                   {
                     key: parent,
-                    type: "button",
                     className: "cg-btn cg-ghost cg-sm",
                     onClick: () => parentCommit(repo, parent),
                   },
-                  truncz(parent, 10),
-                ),
+                  truncate(parent, 10),
+                )
               )
             : "（根提交）",
         ),
@@ -9158,8 +9299,8 @@ function CommitDetail(props) {
               onClick: (event) => event.stopPropagation(),
               onKeyDown: (event) => event.stopPropagation(),
             },
-            h("button", { type: "button", className: fileView === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
-            h("button", { type: "button", className: fileView === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
+            h(ActionButton, { className: fileView === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
+            h(ActionButton, { className: fileView === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
           ),
     ),
     collapsed.files
@@ -9327,8 +9468,8 @@ function DiffDialog() {
         h(
           "div",
           { className: "cg-seg", role: "group", "aria-label": "差异布局" },
-          h("button", { type: "button", className: s.settings.diffLayout === "split" ? "" : "cg-on", title: "统一视图", onClick: () => saveSettings({ diffLayout: "unified" }) }, "统一"),
-          h("button", { type: "button", className: s.settings.diffLayout === "split" ? "cg-on" : "", title: "并排视图", onClick: () => saveSettings({ diffLayout: "split" }) }, "并排"),
+          h(ActionButton, { className: s.settings.diffLayout === "split" ? "" : "cg-on", title: "统一视图", onClick: () => saveSettings({ diffLayout: "unified" }) }, "统一"),
+          h(ActionButton, { className: s.settings.diffLayout === "split" ? "cg-on" : "", title: "并排视图", onClick: () => saveSettings({ diffLayout: "split" }) }, "并排"),
         ),
         h(IconBtn, { name: "copy", label: "复制差异", onClick: () => copyText(dialog.text || "") }),
         h(IconBtn, { name: "x", label: "关闭", onClick: closeDiffDialog }),
@@ -9413,9 +9554,8 @@ function BlameRow(props) {
       { className: "cg-blame-meta" },
       h("span", { className: "cg-file-dot", style: { background: color } }),
       h(
-        "button",
+        ActionButton,
         {
-          type: "button",
           className: "cg-btn cg-ghost cg-sm cg-mono",
           title: item.sha + "\n" + item.summary,
           onClick: () => openCommitFromBlame(repo, { hash: item.sha, subject: item.summary, author: item.author, at: item.time, parents: [], branches: [], tags: [], refs: [] }),
@@ -9768,10 +9908,10 @@ function StashesTab(props) {
                   "div",
                   { style: { display: "flex", gap: "0.375rem", width: "100%", alignItems: "center" } },
                   h("span", { className: "cg-muted cg-mini cg-ellipsis", style: { flex: 1 } }, (item.branch ? item.branch + " · " : "") + shortDate(item.at)),
-                  h(IconBtn, { name: "play", label: "应用", size: 12, onClick: (event) => { event.stopPropagation(); stashApply(repo, item.selector, "apply"); } }),
-                  h(IconBtn, { name: "check", label: "应用并删除", size: 12, onClick: (event) => { event.stopPropagation(); stashApply(repo, item.selector, "pop"); } }),
-                  h(IconBtn, { name: "branch", label: "从贮藏新建分支", size: 12, onClick: (event) => { event.stopPropagation(); stashBranch(repo, item.selector); } }),
-                  h(IconBtn, { name: "trash", label: "删除贮藏", size: 12, onClick: (event) => { event.stopPropagation(); stashApply(repo, item.selector, "drop"); } }),
+                  h(IconBtn, { name: "play", label: "应用", size: 12, onClick: (event) => { event.stopPropagation(); return stashApply(repo, item.selector, "apply"); } }),
+                  h(IconBtn, { name: "check", label: "应用并删除", size: 12, onClick: (event) => { event.stopPropagation(); return stashApply(repo, item.selector, "pop"); } }),
+                  h(IconBtn, { name: "branch", label: "从贮藏新建分支", size: 12, onClick: (event) => { event.stopPropagation(); return stashBranch(repo, item.selector); } }),
+                  h(IconBtn, { name: "trash", label: "删除贮藏", size: 12, onClick: (event) => { event.stopPropagation(); return stashApply(repo, item.selector, "drop"); } }),
                 ),
               ),
             )
@@ -10584,8 +10724,8 @@ function CompactPanel(props) {
               h(
                 "div",
                 { className: "cg-seg", role: "group", "aria-label": "文件视图", onClick: (event) => event.stopPropagation() },
-                h("button", { type: "button", className: fileView === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
-                h("button", { type: "button", className: fileView === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
+                h(ActionButton, { className: fileView === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
+                h(ActionButton, { className: fileView === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
               ),
             ),
             changesOpen && checkedCount
@@ -10764,6 +10904,10 @@ function SettingsPage() {
 
 async function ensureWorkspaceForCommand() {
   if (!state.workspacePath || !state.repos.length) await syncWorkspaceFromHost();
+  if (!state.repos.length && state.scanning) {
+    const task = scanInflight.get(pathKey(state.workspacePath));
+    if (task) await task.promise;
+  }
   return state.workspacePath;
 }
 
@@ -10867,9 +11011,7 @@ function registerGitWorkbench(ctx) {
     key: "git-workbench-refresh",
     title: () => "Git：刷新状态",
     keywords: () => ["git", "refresh", "status"],
-    run: () => {
-      void ensureRepoForCommand().then((repo) => repo && refreshRepo(repo, { details: true }));
-    },
+    run: () => ensureRepoForCommand().then((repo) => repo && refreshRepo(repo, { details: true })),
   }));
   add(ctx.ui.registerCommand({
     key: "git-workbench-fetch",
@@ -11028,14 +11170,16 @@ export default function activate(ctx) {
     pollTimer = null;
   }
   const dispose = registerGitWorkbench(ctx);
+  // 存储与宿主工作区元数据同时读取，省掉一次串行 IPC。
+  const metadataTask = Promise.resolve().then(() => appCtx.workspace.getMetadata()).catch(() => null);
   void (async () => {
     try {
       await loadSettings();
       if (disposed) return;
-      await syncWorkspaceFromHost();
-      if (disposed) return;
       state.ready = true;
       notify();
+      // 工作区同步可能触发深扫，不能让首屏等它结束。
+      void syncWorkspaceFromHost({ metadata: metadataTask });
     } catch (error) {
       // 热重载期间 appCtx 已被置空，此时不再向用户报错。
       if (!disposed) reportError(error, "Git 插件初始化");

@@ -702,15 +702,14 @@ function CommitDetail(props) {
           (commit.parents || []).length
             ? commit.parents.map((parent, index) =>
                 h(
-                  "button",
+                  ActionButton,
                   {
                     key: parent,
-                    type: "button",
                     className: "cg-btn cg-ghost cg-sm",
                     onClick: () => parentCommit(repo, parent),
                   },
-                  truncz(parent, 10),
-                ),
+                  truncate(parent, 10),
+                )
               )
             : "（根提交）",
         ),
@@ -775,8 +774,8 @@ function CommitDetail(props) {
               onClick: (event) => event.stopPropagation(),
               onKeyDown: (event) => event.stopPropagation(),
             },
-            h("button", { type: "button", className: fileView === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
-            h("button", { type: "button", className: fileView === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
+            h(ActionButton, { className: fileView === "tree" ? "cg-on" : "", title: "树形", onClick: () => saveSettings({ fileView: "tree" }) }, h(Icon, { name: "folder", size: 12 })),
+            h(ActionButton, { className: fileView === "flat" ? "cg-on" : "", title: "平铺", onClick: () => saveSettings({ fileView: "flat" }) }, h(Icon, { name: "file", size: 12 })),
           ),
     ),
     collapsed.files
@@ -944,8 +943,8 @@ function DiffDialog() {
         h(
           "div",
           { className: "cg-seg", role: "group", "aria-label": "差异布局" },
-          h("button", { type: "button", className: s.settings.diffLayout === "split" ? "" : "cg-on", title: "统一视图", onClick: () => saveSettings({ diffLayout: "unified" }) }, "统一"),
-          h("button", { type: "button", className: s.settings.diffLayout === "split" ? "cg-on" : "", title: "并排视图", onClick: () => saveSettings({ diffLayout: "split" }) }, "并排"),
+          h(ActionButton, { className: s.settings.diffLayout === "split" ? "" : "cg-on", title: "统一视图", onClick: () => saveSettings({ diffLayout: "unified" }) }, "统一"),
+          h(ActionButton, { className: s.settings.diffLayout === "split" ? "cg-on" : "", title: "并排视图", onClick: () => saveSettings({ diffLayout: "split" }) }, "并排"),
         ),
         h(IconBtn, { name: "copy", label: "复制差异", onClick: () => copyText(dialog.text || "") }),
         h(IconBtn, { name: "x", label: "关闭", onClick: closeDiffDialog }),
@@ -1030,9 +1029,8 @@ function BlameRow(props) {
       { className: "cg-blame-meta" },
       h("span", { className: "cg-file-dot", style: { background: color } }),
       h(
-        "button",
+        ActionButton,
         {
-          type: "button",
           className: "cg-btn cg-ghost cg-sm cg-mono",
           title: item.sha + "\n" + item.summary,
           onClick: () => openCommitFromBlame(repo, { hash: item.sha, subject: item.summary, author: item.author, at: item.time, parents: [], branches: [], tags: [], refs: [] }),

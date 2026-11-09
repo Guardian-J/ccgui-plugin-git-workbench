@@ -189,24 +189,28 @@ function RepoRail() {
     const active = pathKey(s.activeRepo) === pathKey(repo.path);
     const rel = relativePath(repo.workspace || s.workspacePath, repo.path);
     return h(
-      "button",
+      ActionButton,
       {
         key: repo.path,
-        type: "button",
         className: cx("cg-repo", active ? "cg-active" : ""),
+        loading: active && Boolean(data && (data.loading.status || data.loading.details)),
         onClick: () => setActiveRepo(repo.path),
         title: repo.path + (rel && rel !== repo.path ? "\n" + rel : ""),
       },
-      h(Icon, { name: repo.worktree ? "archive" : "git", size: 13, className: "cg-repo-icon" }),
-      h(
-        "span",
-        { className: "cg-repo-main" },
-        h("span", { className: "cg-repo-name" }, repoDisplayName(repo.path)),
-        branch && (branch.head || branch.detached)
-          ? h("span", { className: "cg-repo-sub cg-mono" }, branch.detached ? "游离 HEAD" : branch.head)
-          : null,
-      ),
-      dirty ? h("span", { className: "cg-repo-dirty", title: dirty + " 处更改" }, dirty) : null,
+      (loading) => [
+        loading
+          ? h(Spinner, { key: "icon", size: 13, style: { flex: "none" } })
+          : h(Icon, { key: "icon", name: repo.worktree ? "archive" : "git", size: 13, className: "cg-repo-icon" }),
+        h(
+          "span",
+          { className: "cg-repo-main", key: "main" },
+          h("span", { className: "cg-repo-name" }, repoDisplayName(repo.path)),
+          branch && (branch.head || branch.detached)
+            ? h("span", { className: "cg-repo-sub cg-mono" }, branch.detached ? "游离 HEAD" : branch.head)
+            : null,
+        ),
+        dirty ? h("span", { className: "cg-repo-dirty", key: "dirty", title: dirty + " 处更改" }, dirty) : null,
+      ],
     );
   };
   const rows = [];
