@@ -428,9 +428,9 @@ function draftFor(repo) {
   return state.drafts[repo] || "";
 }
 
-function setDraft(repo, value) {
+function setDraft(repo, value, silent) {
   state.drafts = Object.assign({}, state.drafts, { [repo]: value });
-  notify();
+  if (!silent) notify();
 }
 
 function buildCommitArgs(options) {

@@ -359,7 +359,14 @@ function ChangeGroup(props) {
             appCtx.react.Fragment,
             null,
             sortedFileEntries(group.entries).map((entry) =>
-              h(FileRow, { key: "f:" + group.key + ":" + entry.path, repo, data, groupKey: group.key, entry, selection, depth: -1 }),
+              h(FileRow, {
+                key: "f:" + group.key + ":" + entry.path,
+                repo,
+                entry,
+                depth: -1,
+                checked: Boolean(isEntryChecked(repo, entry)),
+                selected: Boolean(selection && selection.path === entry.path && Boolean(selection.staged) === Boolean(entry.staged)),
+              }),
             ),
           )
         : h(FileTree, { repo, data, groupKey: group.key, nodes: tree, depth: 0, selection })
@@ -405,18 +412,20 @@ function FileTree(props) {
         rows.push(sub);
       }
     } else {
-      rows.push(h(FileRow, { key: "f:" + groupKey + ":" + node.path, repo, data, groupKey, entry: node.entry, selection, depth }));
+      rows.push(h(FileRow, {
+        key: "f:" + groupKey + ":" + node.path,
+        repo,
+        entry: node.entry,
+        depth,
+        checked: Boolean(isEntryChecked(repo, node.entry)),
+        selected: Boolean(selection && selection.path === node.entry.path && Boolean(selection.staged) === Boolean(node.entry.staged)),
+      }));
     }
   }
   return h(appCtx.react.Fragment, null, rows);
 }
 
-function FileRow(props) {
-  const h = appCtx.react.createElement;
-  const { repo, data, groupKey, entry, selection, depth } = props;
-  const checked = Boolean(isEntryChecked(repo, entry));
-  const selected = selection && selection.path === entry.path && Boolean(selection.staged) === Boolean(entry.staged);
-  const code = entryCode(entry);
+function buildFileMenuItems(repo, entry) {
   const open = () => selectFile(repo, entry, modeForEntry(entry));
   const stage = () => stageEntries(repo, [entry]);
   const unstage = () => unstageEntries(repo, [entry]);
@@ -455,7 +464,16 @@ function FileRow(props) {
   } else {
     menuItems.splice(2, 0, { label: "回滚更改", icon: "undo", danger: true, onClick: () => discardPaths(repo, [entry]) });
   }
-  const finalMenu = menuItems.filter(Boolean);
+  return menuItems.filter(Boolean);
+}
+
+function FileRow(props) {
+  const h = appCtx.react.createElement;
+  const { repo, entry, depth, checked, selected } = props;
+  const code = entryCode(entry);
+  const open = () => selectFile(repo, entry, modeForEntry(entry));
+  const stage = () => stageEntries(repo, [entry]);
+  const unstage = () => unstageEntries(repo, [entry]);
   return h(
     "div",
     {
@@ -464,18 +482,18 @@ function FileRow(props) {
       onClick: open,
       onContextMenu: (event) => {
         event.preventDefault();
-        openContextMenu(event.clientX, event.clientY, finalMenu);
+        openContextMenu(event.clientX, event.clientY, buildFileMenuItems(repo, entry));
       },
       title: entry.origPath ? entry.origPath + " → " + entry.path : entry.path,
     },
     h("input", {
       className: "cg-row-check",
       type: "checkbox",
-      checked,
+      checked: Boolean(checked),
       onClick: (event) => event.stopPropagation(),
       onChange: () => toggleChecked(repo, entry),
     }),
-    h(Icon, { name: entry.unmerged ? "warning" : entry.code === "?" ? "file" : "file", size: 12, style: { color: "var(--color-text-tertiary)" } }),
+    h(Icon, { name: entry.unmerged ? "warning" : "file", size: 12, style: { color: "var(--color-text-tertiary)" } }),
     h("span", { className: "cg-row-name" }, entry.path.split("/").pop()),
     h("span", { className: "cg-row-dir" }, dirName(entry.path)),
     h(Badge, { tone: entry.unmerged ? "conflict" : statusTone(code), title: statusText(code) }, code),
@@ -493,7 +511,7 @@ function FileRow(props) {
         size: 12,
         onClick: (event) => {
           const rect = event.currentTarget.getBoundingClientRect();
-          openContextMenu(rect.left, rect.bottom + 2, finalMenu);
+          openContextMenu(rect.left, rect.bottom + 2, buildFileMenuItems(repo, entry));
         },
       }),
     ),
@@ -676,14 +694,15 @@ function FileDiffView(props) {
   const key = diffCacheKey(entry, mode);
   const cache = data.diffCache[key];
   const s = useStoreSnapshot();
-  const { useEffect, useState } = appCtx.react;
+  const { useEffect, useState, useCallback } = appCtx.react;
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const [editError, setEditError] = useState(null);
   useEffect(() => {
     void ensureFileDiff(repo, entry, mode);
   }, [repo, entry.path, entry.staged, mode, s.ignoreWhitespace, s.settings.diffContext, data.statusGeneration, Boolean(cache)]);
-  const refresh = () => ensureFileDiff(repo, entry, mode, true);
+  const makeCallback = useCallback || ((fn) => fn);
+  const refresh = makeCallback(() => ensureFileDiff(repo, entry, mode, true), [repo, entry, mode]);
   const stageFile = async () => {
     const result = await stageEntries(repo, [entry]);
     if (result && result.ok) void refresh();
@@ -812,6 +831,7 @@ function FileDiffView(props) {
                     entry,
                     file,
                     mode,
+                    split: s.settings.diffLayout === "split",
                     refresh,
                     budget: diffBudget,
                   });
@@ -862,7 +882,7 @@ function PreviewFile(props) {
 
 function DiffFileBlock(props) {
   const h = appCtx.react.createElement;
-  const { useEffect, useState } = appCtx.react;
+  const { useEffect, useState, useCallback } = appCtx.react;
   const { repo, entry, file, mode, refresh } = props;
   const [picked, setPicked] = useState({});
   // 差异重新解析后行号会变，旧选择必须作废，否则会暂存/丢弃到错误行。
@@ -870,16 +890,19 @@ function DiffFileBlock(props) {
     setPicked({});
   }, [file]);
   const limit = Math.max(0, Math.min(MAX_DIFF_LINES, Number(props.budget) || MAX_DIFF_LINES));
-  const split = state.settings.diffLayout === "split";
+  const split = Boolean(props.split);
   const selectable = !entry.unmerged && !file.isNew && !file.isDeleted && (mode === "staged" || (mode === "worktree" && entry.code !== "?"));
-  const toggleLine = (hunkIndex, lineIndex) => {
-    const next = Object.assign({}, picked);
-    const set = new Set(next[hunkIndex] || []);
-    if (set.has(lineIndex)) set.delete(lineIndex);
-    else set.add(lineIndex);
-    next[hunkIndex] = set;
-    setPicked(next);
-  };
+  const makeCallback = useCallback || ((fn) => fn);
+  const onPickLine = makeCallback((hunkIndex, lineIndex) => {
+    setPicked((prev) => {
+      const next = Object.assign({}, prev);
+      const set = new Set(next[hunkIndex] || []);
+      if (set.has(lineIndex)) set.delete(lineIndex);
+      else set.add(lineIndex);
+      next[hunkIndex] = set;
+      return next;
+    });
+  }, []);
   const run = (hunkIndex, hunk, action) => {
     const set = picked[hunkIndex];
     return applyHunk(repo, file, hunk, action, set && set.size ? set : null).then((result) => {
@@ -935,25 +958,34 @@ function DiffFileBlock(props) {
         actions,
       ),
     );
-    const onPick = selectable ? (lineIndex) => toggleLine(hunkIndex, lineIndex) : null;
+    const onPick = selectable ? onPickLine : null;
     const bodyRows = [];
     if (split) {
       const rows = pairSplitRows(hunk.lines);
       for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
         if (rendered >= limit) break;
         rendered += 1;
-        bodyRows.push(h(SplitDiffRow, { key: "r" + hunkIndex + ":" + rowIndex, row: rows[rowIndex], lines: hunk.lines, set, onPick }));
+        const row = rows[rowIndex];
+        bodyRows.push(h(SplitDiffRow, {
+          key: "r" + hunkIndex + ":" + rowIndex,
+          row,
+          lines: hunk.lines,
+          hunkIndex,
+          leftPicked: Boolean(set && row.left >= 0 && set.has(row.left)),
+          rightPicked: Boolean(set && row.right >= 0 && set.has(row.right)),
+          onPick,
+        }));
       }
-      blocks.push(h("div", { key: "b" + hunkIndex, className: "cg-hunk-body" }, h("div", { className: split ? "cg-split-grid" : "cg-hunk-inner" }, bodyRows)));
+      blocks.push(h("div", { key: "b" + hunkIndex, className: "cg-hunk-body" }, h("div", { className: "cg-split-grid" }, bodyRows)));
       continue;
     }
     for (let lineIndex = 0; lineIndex < hunk.lines.length; lineIndex += 1) {
       const line = hunk.lines[lineIndex];
       if (rendered >= limit) break;
       rendered += 1;
-      bodyRows.push(h(DiffLine, { key: "l" + hunkIndex + ":" + lineIndex, line, index: lineIndex, picked: Boolean(set && set.has(lineIndex)), onPick }));
+      bodyRows.push(h(DiffLine, { key: "l" + hunkIndex + ":" + lineIndex, line, index: lineIndex, hunkIndex, picked: Boolean(set && set.has(lineIndex)), onPick }));
     }
-    blocks.push(h("div", { key: "b" + hunkIndex, className: "cg-hunk-body" }, h("div", { className: split ? "cg-split-grid" : "cg-hunk-inner" }, bodyRows)));
+    blocks.push(h("div", { key: "b" + hunkIndex, className: "cg-hunk-body" }, h("div", { className: "cg-hunk-inner" }, bodyRows)));
   }
   return h(
     "div",
@@ -975,7 +1007,11 @@ function DiffFileBlock(props) {
 }
 
 /** 并排视图:上下文行两侧同显;连续的删除段与新增段按顺序配对。元素为 {left, right} 行下标(可为 -1)。 */
+const splitRowsCache = new WeakMap();
+
 function pairSplitRows(lines) {
+  const cached = splitRowsCache.get(lines);
+  if (cached) return cached;
   const rows = [];
   let dels = [];
   let adds = [];
@@ -997,12 +1033,13 @@ function pairSplitRows(lines) {
     }
   }
   flush();
+  splitRowsCache.set(lines, rows);
   return rows;
 }
 
 function SplitDiffRow(props) {
   const h = appCtx.react.createElement;
-  const { row, lines, set, onPick } = props;
+  const { row, lines, set, hunkIndex, leftPicked, rightPicked, onPick } = props;
   const cell = (index, side) => {
     if (index < 0) return h("div", { className: "cg-split-cell cg-split-empty" });
     const line = lines[index];
@@ -1011,7 +1048,7 @@ function SplitDiffRow(props) {
     }
     const changed = line.kind === "add" || line.kind === "del";
     const no = side === "left" ? line.oldNo : line.newNo;
-    const isPicked = Boolean(changed && set && set.has(index));
+    const isPicked = Boolean(changed && (side === "left" ? (leftPicked !== undefined ? leftPicked : set && set.has(index)) : (rightPicked !== undefined ? rightPicked : set && set.has(index))));
     return h(
       "div",
       { className: cx("cg-split-cell", line.kind === "add" ? "cg-add" : line.kind === "del" ? "cg-del" : "", isPicked ? "cg-picked" : "") },
@@ -1019,7 +1056,7 @@ function SplitDiffRow(props) {
         "span",
         {
           className: cx("cg-ln", changed && onPick ? "cg-pickable" : ""),
-          onClick: changed && onPick ? () => onPick(index) : undefined,
+          onClick: changed && onPick ? () => (hunkIndex !== undefined ? onPick(hunkIndex, index) : onPick(index)) : undefined,
           title: changed && onPick ? "选择/取消选择此行" : undefined,
         },
         no == null ? "" : no,
@@ -1032,13 +1069,13 @@ function SplitDiffRow(props) {
 
 function DiffLine(props) {
   const h = appCtx.react.createElement;
-  const { line, onPick, index } = props;
+  const { line, onPick, index, hunkIndex } = props;
   const cls = line.kind === "add" ? "cg-add" : line.kind === "del" ? "cg-del" : line.kind === "note" ? "cg-note" : "";
   if (line.kind === "meta") {
     return h("div", { className: "cg-dline cg-note" }, h("span", { className: "cg-code" }, line.text || " "));
   }
   const changed = line.kind === "add" || line.kind === "del";
-  const pick = changed && onPick ? () => onPick(index) : undefined;
+  const pick = changed && onPick ? () => (hunkIndex !== undefined ? onPick(hunkIndex, index) : onPick(index)) : undefined;
   return h(
     "div",
     { className: cx("cg-dline", cls, props.picked ? "cg-picked" : "") },
@@ -1057,21 +1094,26 @@ function CommitBox(props) {
   const { useEffect, useState } = appCtx.react;
   const [historyOpen, setHistoryOpen] = useState(false);
   const [optsOpen, setOptsOpen] = useState(false);
+  const storeDraft = s.drafts[repo] || "";
+  const [message, setMessage] = useState(storeDraft);
   useEffect(() => {
     setHistoryOpen(false);
     setOptsOpen(false);
   }, [repo]);
   useEffect(() => {
+    setMessage(storeDraft);
+  }, [repo, storeDraft]);
+  useEffect(() => {
     if (!historyOpen && !optsOpen) return;
     const onDown = (event) => {
-      if (event.target && event.target.closest && event.target.closest(".cg-commit-pop")) return;
-      setHistoryOpen(false);
-      setOptsOpen(false);
+      if (!event.target || !event.target.closest(".cg-commitbox")) {
+        setHistoryOpen(false);
+        setOptsOpen(false);
+      }
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [historyOpen, optsOpen]);
-  const message = s.drafts[repo] || "";
   const checked = checkedPaths(repo);
   const stagedCount = data.status.staged.length;
   const conflicts = data.status.conflicted.length;
@@ -1111,7 +1153,11 @@ function CommitBox(props) {
         placeholder: s.commitAmend ? "修改最新提交的说明（会包含已暂存更改）" : "提交信息（Ctrl+Enter 提交）",
         value: message,
         spellCheck: false,
-        onChange: (event) => setDraft(repo, event.target.value),
+        onChange: (event) => {
+          const next = event.target.value;
+          setMessage(next);
+          setDraft(repo, next, true);
+        },
         onKeyDown: (event) => {
           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
             event.preventDefault();

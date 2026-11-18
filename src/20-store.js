@@ -61,6 +61,7 @@ let pollTask = null;
 let visibilityHandler = null;
 let disposed = false;
 let deferredNotifyTimer = null;
+let submoduleHelperUnsupported = false;
 
 /** 控制台等高频写入合并成一次通知，避免每条 git 命令触发全量重渲染。 */
 function notifyDeferred() {
@@ -143,6 +144,7 @@ function ensureRepoData(path) {
       refsTruncated: false,
       operations: { merge: false, rebase: false, cherryPick: false, revert: false, bisect: false },
       headMessage: "",
+      headMessageOid: "",
       loading: { status: false, details: false, head: false },
       error: null,
       compare: null,
@@ -429,34 +431,51 @@ function setActiveRepo(path) {
   if (!logView.commits.length) void loadLog(normalized, true);
 }
 
+let workspaceInflight = null;
+let workspaceInflightKey = "";
+
 async function setWorkspace(path, options) {
   const ws = path ? normalizePath(path) : "";
-  if (pathKey(ws) === pathKey(state.workspacePath) && state.repos.length && !(options && options.force)) return;
-  state.workspacePath = ws;
-  state.workspaceName = ws ? baseName(ws) : "";
-  state.scanToken = (state.scanToken || 0) + 1;
-  state.scanning = false;
-  state.repos = [];
-  state.scanError = null;
-  state.scanWarnings = [];
-  state.activeRepo = "";
-  state.selectedFile = null;
-  state.blame = null;
-  state.history = null;
-  if (state.activeTab === "history" || state.activeTab === "blame") state.activeTab = "changes";
-  state.logViews = {};
-  notify();
-  if (!ws) return;
-  const cached = cachedRepoEntry(ws);
-  if (cached && cached.repos.length) {
-    applyCachedRepos(ws, cached.repos);
+  const key = pathKey(ws);
+  const force = Boolean(options && options.force);
+  if (!force && workspaceInflight && workspaceInflightKey === key) return workspaceInflight;
+  if (key === pathKey(state.workspacePath) && state.repos.length && !force) return;
+  const task = (async () => {
+    state.workspacePath = ws;
+    state.workspaceName = ws ? baseName(ws) : "";
+    state.scanToken = (state.scanToken || 0) + 1;
+    state.scanning = false;
+    state.repos = [];
+    state.scanError = null;
+    state.scanWarnings = [];
+    state.activeRepo = "";
+    state.selectedFile = null;
+    state.blame = null;
+    state.history = null;
+    if (state.activeTab === "history" || state.activeTab === "blame") state.activeTab = "changes";
+    state.logViews = {};
     notify();
-  }
-  if (state.settings.autoScan) {
-    // 先返回并展示缓存/扫描态；深扫在后台继续，按钮通过同一个 Promise 保持 pending。
-    void scanWorkspace();
-  } else {
+    if (!ws) return;
+    const cached = cachedRepoEntry(ws);
+    if (cached && cached.repos.length) {
+      applyCachedRepos(ws, cached.repos);
+      notify();
+    }
+    if (state.settings.autoScan) {
+      // 先返回并展示缓存/扫描态；深扫在后台继续，按钮通过同一个 Promise 保持 pending。
+      return scanWorkspace();
+    }
     await loadRootRepoOnly(ws);
+  })();
+  workspaceInflight = task;
+  workspaceInflightKey = key;
+  try {
+    return await task;
+  } finally {
+    if (workspaceInflight === task) {
+      workspaceInflight = null;
+      workspaceInflightKey = "";
+    }
   }
 }
 
@@ -540,9 +559,8 @@ function scanWorkspace(options) {
   const opts = options || {};
   const key = pathKey(ws);
   const running = scanInflight.get(key);
-  if (running && running.token === state.scanToken) return running.promise;
+  if (running && running.token === state.scanToken && !opts.force) return running.promise;
   const cached = cachedRepoEntry(ws);
-  // 缓存里没有任何属于当前工作区的仓库时视为过期结果（工作区后来才 git init，
   // 或缓存由旧版本写入），直接重扫，避免面板长期显示空列表。
   const cacheInScope = Boolean(
     cached && cached.repos.length && cached.repos.some((repo) => repo.isActiveWorkspaceRepo),
@@ -757,18 +775,16 @@ async function loadRepoStatus(path, force) {
       data.statusAt = Date.now();
       // 完整 status 已包含分支与文件清单；无变化时保留 quick 的引用与数组。
       if (changed || !wasLoaded) {
+        const allEntries = parsed.staged.concat(parsed.unstaged, parsed.untracked, parsed.conflicted);
         data.quick = {
           branch: parsed.branch,
-          changed: uniquePaths(
-            parsed.staged.concat(parsed.unstaged, parsed.untracked, parsed.conflicted),
-          ).length,
+          changed: uniquePaths(allEntries).length,
           staged: parsed.staged.length,
           unstaged: parsed.unstaged.length,
           untracked: parsed.untracked.length,
           conflicted: parsed.conflicted.length,
           truncated: parsed.truncated,
-          files: parsed.staged
-            .concat(parsed.unstaged, parsed.untracked, parsed.conflicted)
+          files: allEntries
             .map((entry) => (entry.staged ? "S:" : "W:") + entry.path)
             .sort(),
         };
@@ -802,8 +818,9 @@ async function loadRepoStatus(path, force) {
         }
       }
       if (changed || !wasLoaded || selectionChanged) notify();
-      // 内容未变时无需每轮轮询都启动一次 shell 检查操作状态。
-      if (changed || invalidate || Date.now() - (data.operationsAt || 0) >= 15000) {
+      // 内容未变时降低操作状态 shell 检测频率（仅在进行中/冲突或超过 60 秒时补查）。
+      const hasActiveOp = data.operations && (data.operations.merge || data.operations.rebase || data.operations.cherryPick || data.operations.revert || data.operations.bisect);
+      if (changed || invalidate || !data.operationsAt || hasActiveOp || parsed.conflicted.length > 0 || Date.now() - data.operationsAt >= 60000) {
         data.operationsAt = Date.now();
         void loadOperations(key).catch(() => undefined);
       }
@@ -912,18 +929,21 @@ function updateExpandedDirs(repo, status) {
 async function loadOperations(repo) {
   const data = ensureRepoData(repo);
   const gitDir = data.gitDir || (await resolveGitDir(repo));
+  if (gitDir && !data.gitDir) data.gitDir = gitDir;
   const operations = { merge: false, cherryPick: false, revert: false, bisect: false, rebase: false };
   let operationsError = null;
   if (gitDir) {
     // 一次 shell 检查全部状态文件，避免轮询时反复启动 4 个 git 进程。
+    const posixOps = 'd="$CCGIT_GITDIR"; printf "%s %s %s %s %s\\n" "$([ -f "$d/MERGE_HEAD" ] && echo 1 || echo 0)" "$([ -f "$d/CHERRY_PICK_HEAD" ] && echo 1 || echo 0)" "$([ -f "$d/REVERT_HEAD" ] && echo 1 || echo 0)" "$([ -f "$d/BISECT_LOG" ] && echo 1 || echo 0)" "$([ -d "$d/rebase-merge" ] || [ -d "$d/rebase-apply" ] && echo 1 || echo 0)"';
     const script = shellIsWindows({ CCGIT_GITDIR: gitDir })
       ? "$d=$env:CCGIT_GITDIR; $out=@(); foreach($n in @('MERGE_HEAD','CHERRY_PICK_HEAD','REVERT_HEAD','BISECT_LOG')){ if(Test-Path -LiteralPath ([IO.Path]::Combine($d,$n))){$out+='1'}else{$out+='0'} }; $r=0; if((Test-Path -LiteralPath ([IO.Path]::Combine($d,'rebase-merge'))) -or (Test-Path -LiteralPath ([IO.Path]::Combine($d,'rebase-apply')))){$r=1}; [Console]::Out.Write(($out -join ' ')+' '+$r)"
-      : 'd="$CCGIT_GITDIR"; printf "%s %s %s %s %s\n" "$([ -f "$d/MERGE_HEAD" ] && echo 1 || echo 0)" "$([ -f "$d/CHERRY_PICK_HEAD" ] && echo 1 || echo 0)" "$([ -f "$d/REVERT_HEAD" ] && echo 1 || echo 0)" "$([ -f "$d/BISECT_LOG" ] && echo 1 || echo 0)" "$([ -d "$d/rebase-merge" ] || [ -d "$d/rebase-apply" ] && echo 1 || echo 0)"';
+      : posixOps;
     try {
       const res = await runShell(script, { CCGIT_GITDIR: toSlash(gitDir) }, {
         allowFailure: true,
         description: "检测进行中的 Git 操作",
         timeoutMs: 10000,
+        posixScript: posixOps,
       });
       const parts = String(res.stdout || "").trim().split(/\s+/);
       if (parts.length >= 5) {
@@ -940,9 +960,17 @@ async function loadOperations(repo) {
       operationsError = safeError(error);
     }
   }
+  const prev = data.operations || {};
+  const opChanged =
+    Boolean(prev.merge) !== operations.merge ||
+    Boolean(prev.rebase) !== operations.rebase ||
+    Boolean(prev.cherryPick) !== operations.cherryPick ||
+    Boolean(prev.revert) !== operations.revert ||
+    Boolean(prev.bisect) !== operations.bisect ||
+    (data.operationsError || null) !== operationsError;
   data.operations = operations;
   data.operationsError = operationsError;
-  notify();
+  if (opChanged) notify();
 }
 
 /* ---------- 分支 / 标签 / 暂存 / 远程 / 子模块 ---------- */
@@ -961,7 +989,8 @@ async function loadRepoDetails(path, force) {
     }
     return data.detailsFollowUp;
   }
-  if (!force && Date.now() - (data.detailsAt || 0) < 15000) return;
+  const hasErrors = data.detailsErrors && Object.keys(data.detailsErrors).length > 0;
+  if (!force && !hasErrors && Date.now() - (data.detailsAt || 0) < 15000) return;
   const generation = (data.detailsGeneration || 0) + 1;
   data.detailsGeneration = generation;
   data.loading.details = true;
@@ -985,48 +1014,93 @@ async function loadRepoDetails(path, force) {
       if (clipped.truncated) truncated = true;
       return parse(clipped.text);
     };
-    const [gitDir, bare, branches, tags, stashes, remotes, worktrees, submodules, headMessage] =
-      await Promise.all([
-        safe(() => resolveGitDir(key), data.gitDir || ""),
-        safe(async () => {
-          const res = await runGit(key, ["rev-parse", "--is-bare-repository"], {
-            allowFailure: true,
-            timeoutMs: 10000,
-          });
-          return res.code === 0 && /true/.test(res.stdout);
-        }, false),
-        safe(() => refs([
-          "for-each-ref",
-          "--format=%(refname)%00%(objectname)%00%(objectname:short)%00%(upstream:short)%00%(upstream:track)%00%(committerdate:unix)%00%(authorname)%00%(subject)",
-          "refs/heads",
-          "refs/remotes",
-        ], 20000, parseBranches), { locals: [], remotes: [] }, "branches"),
-        safe(() => refs([
-          "for-each-ref",
-          "--format=%(refname:short)%00%(objectname)%00%(objecttype)%00%(taggername)%00%(taggerdate:unix)%00%(subject)%00%(*objectname:short)",
-          "refs/tags",
-        ], 20000, parseTags), [], "tags"),
-        safe(() => refs(["stash", "list", "--pretty=format:%gd%x1f%H%x1f%ct%x1f%gs"], 20000, parseStashes), [], "stashes"),
-        safe(() => refs(["remote", "-v"], 10000, parseRemotes), [], "remotes"),
-        safe(() => refs(["worktree", "list", "--porcelain"], 15000, parseWorktrees), [], "worktrees"),
-        safe(async () => {
-          try {
-            return await refs(["submodule", "status", "--recursive"], 20000, parseSubmodules);
-          } catch (error) {
-            // 索引里有 gitlink 而 .gitmodules 缺映射时 git 退出码 128；
-            // 这不是读取失败，用索引重建子模块列表即可。
-            if (!/no submodule mapping found/i.test(safeError(error))) throw error;
-            return await refs(["ls-files", "--stage"], 20000, parseGitlinks);
-          }
-        }, [], "submodules"),
-        safe(async () => {
-          const res = await runGit(key, ["log", "-1", "--format=%B"], {
-            allowFailure: true,
-            timeoutMs: 10000,
-          });
-          return (res.stdout || "").trim();
-        }, ""),
-      ]);
+    // 合并探测 gitDir 与 bare 标记，已探测过且非强制刷新时直接复用缓存。
+    let gitDir = data.gitDir || "";
+    let bare = Boolean(data.bare);
+    if (force || !gitDir) {
+      const meta = await safe(async () => {
+        const res = await runGit(key, ["rev-parse", "--absolute-git-dir", "--is-bare-repository"], {
+          allowFailure: true,
+          timeoutMs: 15000,
+        });
+        if (res.code !== 0) return { gitDir: gitDir || (await resolveGitDir(key)), bare };
+        const lines = splitLines((res.stdout || "").trim());
+        return {
+          gitDir: lines[0] ? normalizePath(lines[0]) : gitDir,
+          bare: lines[1] ? /true/.test(lines[1]) : bare,
+        };
+      }, { gitDir, bare });
+      gitDir = meta.gitDir || gitDir;
+      bare = Boolean(meta.bare);
+    }
+    const branchInfo = (data.status && data.status.branch) || {};
+    const currentOid = branchInfo.oid || "";
+    const skipHeadMsg = bare || Boolean(branchInfo.unborn) || (!force && Boolean(currentOid) && data.headMessageOid === currentOid && Boolean(data.headMessage));
+    const jobs = [
+      () => safe(() => refs([
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)%00%(objectname:short)%00%(upstream:short)%00%(upstream:track)%00%(committerdate:unix)%00%(authorname)%00%(subject)",
+        "refs/heads",
+        "refs/remotes",
+      ], 30000, parseBranches), { locals: [], remotes: [] }, "branches"),
+      () => safe(() => refs([
+        "for-each-ref",
+        "--format=%(refname:short)%00%(objectname)%00%(objecttype)%00%(taggername)%00%(taggerdate:unix)%00%(subject)%00%(*objectname:short)",
+        "refs/tags",
+      ], 30000, parseTags), [], "tags"),
+      () => (bare ? Promise.resolve([]) : safe(() => refs(["stash", "list", "--pretty=format:%gd%x1f%H%x1f%ct%x1f%gs"], 30000, parseStashes), [], "stashes")),
+      () => safe(() => refs(["remote", "-v"], 30000, parseRemotes), [], "remotes"),
+      () => safe(() => refs(["worktree", "list", "--porcelain"], 30000, parseWorktrees), [], "worktrees"),
+      () => (bare
+        ? Promise.resolve([])
+        : safe(async () => {
+            // 优先使用纯 C 内建 submodule--helper，避免 Windows 下 git-submodule POSIX shell 启动耗时数十秒超时。
+            if (!submoduleHelperUnsupported) {
+              try {
+                return await refs(["submodule--helper", "status", "--recursive"], 30000, parseSubmodules);
+              } catch (helperErr) {
+                const msg = safeError(helperErr);
+                if (/no submodule mapping found/i.test(msg)) {
+                  return await refs(["ls-files", "--stage"], 30000, parseGitlinks);
+                }
+                if (!/unknown subcommand|unknown option|not a git command|usage:/i.test(msg)) throw helperErr;
+                submoduleHelperUnsupported = true;
+              }
+            }
+            try {
+              return await refs(["submodule", "status", "--recursive"], 45000, parseSubmodules);
+            } catch (error) {
+              // 索引里有 gitlink 而 .gitmodules 缺映射时 git 退出码 128；用索引重建子模块列表即可。
+              if (!/no submodule mapping found/i.test(safeError(error))) throw error;
+              return await refs(["ls-files", "--stage"], 30000, parseGitlinks);
+            }
+          }, [], "submodules")),
+      () => (skipHeadMsg
+        ? Promise.resolve(bare || branchInfo.unborn ? "" : data.headMessage || "")
+        : safe(async () => {
+            const res = await runGit(key, ["log", "-1", "--format=%B"], {
+              allowFailure: true,
+              timeoutMs: 15000,
+            });
+            return (res.stdout || "").trim();
+          }, "")),
+    ];
+    // 限制并发度，避免 Windows 下同时起近十个 git 子进程相互抢占导致集体慢化/超时。
+    const results = new Array(jobs.length);
+    let cursor = 0;
+    const workers = [];
+    const concurrency = Math.min(3, jobs.length);
+    for (let w = 0; w < concurrency; w += 1) {
+      workers.push((async () => {
+        while (cursor < jobs.length) {
+          const idx = cursor;
+          cursor += 1;
+          results[idx] = await jobs[idx]();
+        }
+      })());
+    }
+    await Promise.all(workers);
+    const [branches, tags, stashes, remotes, worktrees, submodules, headMessage] = results;
     if (data.detailsGeneration !== generation) return;
     data.gitDir = gitDir || data.gitDir;
     data.bare = bare;
@@ -1037,6 +1111,7 @@ async function loadRepoDetails(path, force) {
     data.worktrees = worktrees;
     data.submodules = submodules;
     data.headMessage = headMessage;
+    if (!bare && !branchInfo.unborn && currentOid) data.headMessageOid = currentOid;
     data.detailsErrors = errors;
     data.refsTruncated = truncated;
     data.detailsAt = Date.now();
@@ -1255,7 +1330,13 @@ function disposeStore() {
   state.dialog = null;
   state.busy = "";
   state.workbenchOpen = false;
+  resetGitPlatformCache();
+  workspaceInflight = null;
+  workspaceInflightKey = "";
   scanInflight.clear();
   quickInflight.clear();
+  statusInflight.clear();
+  detailsInflight.clear();
+  logInflight.clear();
   storeListeners.clear();
 }

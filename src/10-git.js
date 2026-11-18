@@ -34,11 +34,17 @@ async function getDataRoot() {
   return dataRoot;
 }
 
+const ensuredDirs = new Set();
+
 async function getTempDir() {
   const root = await getDataRoot();
   if (!root) throw new Error("无法获取插件数据目录，无法创建临时补丁文件");
   const dir = joinPath(root, DATA_DIR);
-  await ensureDir(dir);
+  const key = pathKey(dir);
+  if (!ensuredDirs.has(key)) {
+    await ensureDir(dir);
+    ensuredDirs.add(key);
+  }
   return dir;
 }
 
@@ -204,6 +210,14 @@ function shellIsWindows(env) {
     .some((line) => looksWindowsPath(line.trim()));
 }
 
+let windowsGitShCap = null; // null: 未探测, true: 可用, false: 不可用(回退 powershell)
+let windowsGitShPromise = null;
+
+function resetGitPlatformCache() {
+  windowsGitShCap = null;
+  windowsGitShPromise = null;
+  ensuredDirs.clear();
+}
 function shellBin(env) {
   return shellIsWindows(env) ? "powershell" : "sh";
 }
@@ -215,11 +229,86 @@ function shellArgs(script, windows) {
   return ["-c", script, "ccgui"];
 }
 
+/**
+ * 经 git alias (`!`) 执行 POSIX sh 脚本。
+ * Git for Windows 自带 MSYS2 sh 与 find/base64/head/tail 等 coreutils，
+ * 启动约 150-300ms（无需 PowerShell .NET 冷启动），且不依赖宿主 PATH 暴露 Git\usr\bin。
+ */
+async function runGitSh(script, env, options) {
+  const opts = options || {};
+  const started = Date.now();
+  const display = "git -c alias.cg=!<sh> cg";
+  let result;
+  try {
+    result = await bridgeInvoke("plugin_exec_run", {
+      bin: "git",
+      args: ["-c", "alias.cg=!" + script, "cg"],
+      env: gitEnv(env),
+      timeoutMs: Math.max(1000, Math.min(NETWORK_TIMEOUT_MS, opts.timeoutMs || 30000)),
+    });
+  } catch (error) {
+    const message = safeError(error);
+    if (!opts.silent) {
+      pushConsole({
+        kind: "shell",
+        description: opts.description || "",
+        display,
+        code: null,
+        stderr: message,
+        durationMs: Date.now() - started,
+      });
+    }
+    throw new GitCommandError(message);
+  }
+  const entry = opts.silent
+    ? null
+    : pushConsole({
+        kind: "shell",
+        description: opts.description || "",
+        display,
+        code: result.code,
+        stdout: result.stdout || "",
+        stderr: result.stderr || "",
+        durationMs: Date.now() - started,
+      });
+  if (result.code !== 0 && !opts.allowFailure) {
+    throw new GitCommandError((result.stderr || "").trim() || "git sh 命令失败", entry);
+  }
+  return { code: result.code, stdout: result.stdout || "", stderr: result.stderr || "" };
+}
+
+/**
+ * 探测 Windows 下 git alias `!` 是否自带 sh 与常用 coreutils。
+ * 并发调用共享同一 Promise，只探测一次；缺 MSYS2 工具时平滑回退到 PowerShell。
+ */
+function canUseWindowsGitSh() {
+  if (windowsGitShCap !== null) return Promise.resolve(windowsGitShCap);
+  if (!windowsGitShPromise) {
+    windowsGitShPromise = runGitSh(
+      "for c in find base64 head tail mktemp stat chmod mv rm mkdir; do command -v $c >/dev/null 2>&1 || exit 1; done",
+      {},
+      { allowFailure: true, timeoutMs: 8000, silent: true },
+    )
+      .then((res) => {
+        windowsGitShCap = res.code === 0;
+        return windowsGitShCap;
+      })
+      .catch(() => {
+        windowsGitShCap = false;
+        return false;
+      });
+  }
+  return windowsGitShPromise;
+}
+
 /** 执行平台 shell 脚本；调用方负责把所有用户数据放进 env，避免注入。 */
 async function runShell(script, env, options) {
   const opts = options || {};
   const started = Date.now();
   const windows = shellIsWindows(env);
+  if (windows && opts.posixScript && (await canUseWindowsGitSh())) {
+    return runGitSh(opts.posixScript, env, opts);
+  }
   const bin = shellBin(env);
   const display = bin + (windows ? " -Command <script>" : " -c <script>");
   let result;
@@ -316,9 +405,10 @@ const POWERSHELL_B64_PREFIX =
   "[Convert]::ToBase64String($buf,0,$n)}finally{$fs.Close()}";
 
 const POSIX_B64_READ =
-  '[ -f "$CCGIT_FILE" ] || exit 3; t=$(mktemp) || exit 4; trap \'rm -f "$t"\' EXIT; ' +
-  'tail -c +$((CCGIT_OFFSET + 1)) "$CCGIT_FILE" > "$t" || exit 5; head -c "$CCGIT_LEN" "$t" | base64';
-
+  '[ -f "$CCGIT_FILE" ] || exit 3; ' +
+  'if [ "${CCGIT_OFFSET:-0}" -eq 0 ]; then head -c "$CCGIT_LEN" "$CCGIT_FILE" | base64; ' +
+  'else t=$(mktemp) || exit 4; trap \'rm -f "$t"\' EXIT; ' +
+  'tail -c +$((CCGIT_OFFSET + 1)) "$CCGIT_FILE" > "$t" || exit 5; head -c "$CCGIT_LEN" "$t" | base64; fi';
 /**
  * 读取工作区文件。返回 {text, bytes, binary, truncated, size}；文件不存在返回 null。
  * 分块（base64）读取，避免 64KB 单次输出上限与 UTF-8 边界截断。
@@ -344,7 +434,7 @@ async function readWorkspaceFile(path, options) {
       CCGIT_FILE: toSlash(path),
       CCGIT_OFFSET: String(offset),
       CCGIT_LEN: String(want),
-    }, { description: "读取文件", allowFailure: true, timeoutMs: 30000, silent: true });
+    }, { description: "读取文件", allowFailure: true, timeoutMs: 30000, silent: true, posixScript: POSIX_B64_READ });
     if (res.code !== 0) {
       if (offset === 0) return null;
       readFailed = true;
@@ -398,12 +488,13 @@ async function readWorkspaceFile(path, options) {
 
 /** 路径是否存在（用于区分“文件不存在”和“文件不可读”，避免误覆盖）。 */
 async function workspacePathExists(path) {
+  const posixScript = '[ -e "$CCGIT_FILE" ]';
   const res = await runShell(
     shellIsWindows({ CCGIT_FILE: path })
       ? "if(Test-Path -LiteralPath $env:CCGIT_FILE){exit 0}else{exit 1}"
-      : '[ -e "$CCGIT_FILE" ]',
+      : posixScript,
     { CCGIT_FILE: toSlash(path) },
-    { description: "检查文件是否存在", allowFailure: true, timeoutMs: 15000, silent: true },
+    { description: "检查文件是否存在", allowFailure: true, timeoutMs: 15000, silent: true, posixScript },
   );
   return res.code === 0;
 }
@@ -424,25 +515,41 @@ function posixWriteScript(append) {
 /** 写入工作区文件（UTF-8，无 BOM）。文本不能含 NUL。 */
 async function writeWorkspaceFile(path, text) {
   const windows = shellIsWindows({ CCGIT_FILE: path });
+  const preferGitSh = windows ? await canUseWindowsGitSh() : false;
+  const usePosix = !windows || preferGitSh;
   const chunks = chunkText(text, windows ? 12000 : 24000);
   if (!chunks.length) chunks.push("");
-  const writeChunk = async (target, chunk, append) => {
-    await runShell(windows ? powershellWriteScript(append) : posixWriteScript(append), {
-      CCGIT_FILE: toSlash(target),
-      CCGIT_CHUNK: chunk,
-    }, { description: "写入文件", timeoutMs: 30000, silent: true });
-  };
-  // 分块写直接作用于目标文件时，任一块失败就只剩半截内容；先写临时文件再整体替换。
+  const posixMove =
+    'if [ -e "$CCGIT_FILE" ]; then p=$(stat -c %a "$CCGIT_FILE" 2>/dev/null || stat -f %Lp "$CCGIT_FILE" 2>/dev/null); [ -n "$p" ] && chmod "$p" "$CCGIT_TMP"; fi; mv -f "$CCGIT_TMP" "$CCGIT_FILE"';
   const tmp = path + ".cg-tmp";
   try {
+    if (chunks.length === 1 && usePosix) {
+      // 单块文本合并写临时文件、保留权限与原子替换，减少进程启动开销。
+      const singlePosix = 'printf \'%s\' "$CCGIT_CHUNK" > "$CCGIT_TMP" || exit 1; ' + posixMove;
+      await runShell(singlePosix, {
+        CCGIT_TMP: toSlash(tmp),
+        CCGIT_FILE: toSlash(path),
+        CCGIT_CHUNK: chunks[0],
+      }, { description: "写入文件", timeoutMs: 30000, silent: true, posixScript: singlePosix });
+      return true;
+    }
+    const writeChunk = async (target, chunk, append) => {
+      const posixScript = posixWriteScript(append);
+      await runShell(windows ? powershellWriteScript(append) : posixScript, {
+        CCGIT_FILE: toSlash(target),
+        CCGIT_CHUNK: chunk,
+      }, { description: "写入文件", timeoutMs: 30000, silent: true, posixScript });
+    };
+    // 分块写直接作用于目标文件时，任一块失败就只剩半截内容；先写临时文件再整体替换。
     for (let i = 0; i < chunks.length; i += 1) await writeChunk(tmp, chunks[i], i > 0);
     const move = windows
       ? "Move-Item -LiteralPath $env:CCGIT_TMP -Destination $env:CCGIT_FILE -Force"
-      : 'if [ -e "$CCGIT_FILE" ]; then p=$(stat -c %a "$CCGIT_FILE" 2>/dev/null || stat -f %Lp "$CCGIT_FILE" 2>/dev/null); [ -n "$p" ] && chmod "$p" "$CCGIT_TMP"; fi; mv -f "$CCGIT_TMP" "$CCGIT_FILE"';
+      : posixMove;
     await runShell(move, { CCGIT_TMP: toSlash(tmp), CCGIT_FILE: toSlash(path) }, {
       description: "替换文件",
       timeoutMs: 30000,
       silent: true,
+      posixScript: posixMove,
     });
   } catch (error) {
     await removeWorkspaceFile(tmp);
@@ -452,26 +559,31 @@ async function writeWorkspaceFile(path, text) {
 }
 
 async function removeWorkspaceFile(path) {
+  const posixScript = 'rm -f "$CCGIT_FILE"';
   const script = shellIsWindows({ CCGIT_FILE: path })
     ? "if(Test-Path -LiteralPath $env:CCGIT_FILE){Remove-Item -LiteralPath $env:CCGIT_FILE -Force}"
-    : 'rm -f "$CCGIT_FILE"';
+    : posixScript;
   await runShell(script, { CCGIT_FILE: toSlash(path) }, {
     description: "删除临时文件",
     allowFailure: true,
     timeoutMs: 15000,
     silent: true,
+    posixScript,
   });
 }
 
 async function ensureDir(path) {
+  const posixScript = 'mkdir -p "$CCGIT_DIR"';
   const script = shellIsWindows({ CCGIT_DIR: path })
     ? "[IO.Directory]::CreateDirectory($env:CCGIT_DIR)|Out-Null"
-    : 'mkdir -p "$CCGIT_DIR"';
+    : posixScript;
   await runShell(script, { CCGIT_DIR: toSlash(path) }, {
     description: "创建目录",
     timeoutMs: 15000,
     silent: true,
+    posixScript,
   });
+  ensuredDirs.add(pathKey(path));
 }
 
 /* ---------- 仓库发现 ---------- */
@@ -562,6 +674,26 @@ function findScript(excludes, windows) {
  * 合并成单次进程启动，避免每个工作区各起一个 shell。
  * 返回 [{ owner, path }]，owner 是发起扫描的根。
  */
+function findScriptGnu(excludes) {
+  const names = Array.from(new Set(BUILTIN_SCAN_SKIP.concat(excludes || [])));
+  const escFind = (name) => "'" + String(name).replace(/[\\*?[\]]/g, "\\$&").replace(/'/g, "'\\''") + "'";
+  const skipExpr = names.map((name) => "-name " + escFind(name)).join(" -o ");
+  // -maxdepth 为深度+1（根目录本身为 0，其 .git 在深度 1，scanDepth 层子目录的 .git 在深度 scanDepth+1）。
+  return [
+    'd=$((CCGIT_DEPTH + 1));',
+    'printf \'%s\\n\' "$CCGIT_ROOTS" | while IFS= read -r root; do',
+    '  [ -n "$root" ] && [ -d "$root" ] || continue;',
+    '  printf \'__R__\\000%s\\000\' "$root";',
+    '  find -H "$root" -maxdepth "$d" \\( -name .git -print0 -prune \\) -o \\( -mindepth 1 -type d \\( ' + skipExpr + ' \\) -prune \\) 2>/dev/null;',
+    'done',
+  ].join("\n");
+}
+
+/**
+ * 一次 shell 调用扫描多个根目录下的 .git（目录或 worktree/submodule 的 gitfile）。
+ * 合并成单次进程启动，避免每个工作区各起一个 shell。
+ * 返回 [{ owner, path }]，owner 是发起扫描的根。
+ */
 async function scanGitRoots(roots, settings) {
   const list = [];
   const seenRoot = new Set();
@@ -580,17 +712,44 @@ async function scanGitRoots(roots, settings) {
   const res = await runShell(findScript(excludes, windows), {
     CCGIT_ROOTS: list.map((root) => toSlash(root)).join("\n"),
     CCGIT_DEPTH: String(depth),
-  }, { description: "扫描 Git 仓库", timeoutMs: 60000, allowFailure: true });
+  }, {
+    description: "扫描 Git 仓库",
+    timeoutMs: 60000,
+    allowFailure: true,
+    posixScript: windows ? findScriptGnu(excludes) : "",
+  });
   if (res.code !== 0 && !res.stdout) {
     throw new GitCommandError((res.stderr || "").trim() || "目录扫描失败");
   }
   const found = [];
   const seen = new Set();
   const raw = String(res.stdout || "").replace(/^\uFEFF/, "");
-  // 每对记录都以 NUL 收尾；末尾缺 NUL 或长度触顶说明输出被宿主截断。
   const truncated = raw.length >= GIT_MAX_OUTPUT - 64 || (raw.length > 0 && !raw.endsWith("\0"));
-  // owner 与 .git 路径按 NUL 成对输出；目录名含换行/制表符也不会错位。
   const tokens = raw.split("\0");
+  if (raw.startsWith("__R__\0")) {
+    let currentOwner = "";
+    for (let i = 0; i < tokens.length; i += 1) {
+      const tok = tokens[i];
+      if (!tok) continue;
+      if (tok === "__R__") {
+        if (i + 1 >= tokens.length) break;
+        currentOwner = normalizePath(tokens[i + 1]);
+        i += 1;
+        continue;
+      }
+      const gitPath = toSlash(tok);
+      if (baseName(gitPath) !== ".git") continue;
+      const root = dirName(gitPath);
+      if (!root) continue;
+      const key = pathKey(root);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({ owner: currentOwner || normalizePath(root), path: normalizePath(root) });
+    }
+    return { roots: found, truncated };
+  }
+  // 每对记录都以 NUL 收尾；末尾缺 NUL 或长度触顶说明输出被宿主截断。
+  // owner 与 .git 路径按 NUL 成对输出；目录名含换行/制表符也不会错位。
   for (let i = 0; i + 1 < tokens.length; i += 2) {
     const owner = normalizePath(tokens[i]);
     const gitPath = toSlash(tokens[i + 1]);
@@ -819,19 +978,27 @@ async function discoverRepos(workspacePath, settings, options) {
   }
   if (scanPromise) await scanPromise;
 
-  const repos = Array.from(found.values()).map((item) => {
+  const foundValues = Array.from(found.values());
+  const foundKeys = foundValues.map((item) => pathKey(item.path));
+  const repos = foundValues.map((item, idx) => {
     const path = item.path;
-    const parents = Array.from(found.values()).filter(
-      (other) => pathKey(other.path) !== pathKey(path) && isSubPath(other.path, path),
-    );
+    const myKey = foundKeys[idx];
+    let nested = false;
+    for (let j = 0; j < foundValues.length; j += 1) {
+      if (j === idx || foundKeys[j] === myKey) continue;
+      if (isSubPath(foundValues[j].path, path)) {
+        nested = true;
+        break;
+      }
+    }
     return {
       path,
       name: repoDisplayName(path, ws),
       sources: item.sources,
       workspace: item.workspace || (ws ? ws : ""),
       relative: ws ? relativePath(ws, path) : path,
-      nested: parents.length > 0,
-      isActiveWorkspaceRepo: ws ? isSubPath(ws, path) || pathKey(path) === pathKey(ws) : false,
+      nested,
+      isActiveWorkspaceRepo: ws ? isSubPath(ws, path) || myKey === pathKey(ws) : false,
     };
   });
   repos.sort((a, b) => {

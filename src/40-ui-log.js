@@ -290,11 +290,13 @@ function GraphCell(props) {
 function LogTab(props) {
   const h = appCtx.react.createElement;
   const s = useStoreSnapshot();
-  const { useEffect, useRef, useMemo } = appCtx.react;
+  const { useEffect, useRef, useMemo, useCallback } = appCtx.react;
   const repo = props.repo;
   const data = ensureRepoData(repo);
   const view = getLogView(repo);
   const graph = useMemo(() => buildGraphRows(view.commits), [view.commits]);
+  const makeCallback = useCallback || ((fn) => fn);
+  const handleSelectCommit = makeCallback((commit) => selectCommit(repo, commit), [repo]);
   const selected = data.selectedCommit;
   const historyPath = s.history && pathKey(s.history.repo) === pathKey(repo) ? s.history.path : "";
   useEffect(() => {
@@ -440,7 +442,7 @@ function LogTab(props) {
               graphRow: graph.rows[index],
               maxLanes: graph.maxLanes,
               selected: selected && selected.hash === item.hash,
-              onSelect: () => selectCommit(repo, item),
+              onSelect: handleSelectCommit,
             }),
           ),
           !view.commits.length && view.loading
@@ -469,7 +471,7 @@ function CommitRow(props) {
     "div",
     {
       className: cx("cg-commit-row", selected ? "cg-selected" : "", commit.head ? "cg-is-head" : ""),
-      onClick: onSelect,
+      onClick: () => onSelect && onSelect(commit),
       onContextMenu: (event) => {
         event.preventDefault();
         openContextMenu(event.clientX, event.clientY, commitMenuItems(repo, commit));
@@ -480,13 +482,23 @@ function CommitRow(props) {
     h(
       "div",
       { className: "cg-commit-text" },
-      commit.head ? h("span", { className: "cg-ref cg-head", title: "当前提交（HEAD）" }, "HEAD") : null,
-      commit.branches.map((name) => h("span", { key: "b" + name, className: "cg-ref cg-branch", title: name }, name)),
-      commit.tags.map((name) => h("span", { key: "t" + name, className: "cg-ref cg-tag", title: name }, name)),
-      (commit.remotes || [])
-        .slice(0, 3)
-        .map((ref) => h("span", { key: "r" + ref, className: "cg-ref cg-remote", title: ref }, ref)),
-      h("span", { className: "cg-commit-subject" }, commit.subject || "(无提交信息)"),
+      commit.head || commit.branches.length || commit.tags.length || (commit.remotes && commit.remotes.length)
+        ? h(
+            "div",
+            { className: "cg-commit-refs" },
+            commit.head ? h("span", { className: "cg-ref cg-head", title: "当前提交（HEAD）" }, h("span", { className: "cg-ref-text" }, "HEAD")) : null,
+            commit.branches.map((name) =>
+              h("span", { key: "b" + name, className: "cg-ref cg-branch", title: name }, h("span", { className: "cg-ref-text" }, name)),
+            ),
+            commit.tags.map((name) =>
+              h("span", { key: "t" + name, className: "cg-ref cg-tag", title: name }, h("span", { className: "cg-ref-text" }, name)),
+            ),
+            (commit.remotes || [])
+              .slice(0, 3)
+              .map((ref) => h("span", { key: "r" + ref, className: "cg-ref cg-remote", title: ref }, h("span", { className: "cg-ref-text" }, ref))),
+          )
+        : null,
+      h("span", { className: "cg-commit-subject", title: commit.subject || undefined }, commit.subject || "(无提交信息)"),
     ),
     h("span", { className: "cg-commit-meta cg-commit-author", title: commit.author }, commit.author),
     h("span", { className: "cg-commit-meta cg-commit-date", title: shortDate(commit.at) }, dateOnly(commit.at)),
