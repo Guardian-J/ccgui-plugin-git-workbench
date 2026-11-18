@@ -637,6 +637,20 @@ async function loadQuickStatuses(repos) {
   await Promise.all(workers);
 }
 
+function quickStatusChanged(previous, next) {
+  if (!previous || previous.error !== next.error) return true;
+  if (next.error) return false;
+  const a = previous.branch || {};
+  const b = next.branch || {};
+  if (["head", "oid", "upstream", "ahead", "behind", "detached", "unborn", "upstreamGone"]
+    .some((key) => a[key] !== b[key])) return true;
+  if (["changed", "staged", "unstaged", "untracked", "conflicted", "truncated"]
+    .some((key) => previous[key] !== next[key])) return true;
+  const before = previous.files || [];
+  const after = next.files || [];
+  return before.length !== after.length || before.some((path, index) => path !== after[index]);
+}
+
 function loadQuickStatusFor(path, options) {
   const key = normalizePath(path);
   const force = Boolean(options && options.force);
@@ -649,10 +663,14 @@ function loadQuickStatusFor(path, options) {
     try {
       const quick = await loadQuickStatus(key);
       if (!state.repoData[key]) return;
-      data.quick = quick;
+      const previous = data.quick;
+      const changed = quickStatusChanged(previous, quick);
+      if (changed) data.quick = quick;
       data.quickAt = Date.now();
-      if (quick.error) data.error = quick.error;
-      notify();
+      if (changed) {
+        if (quick.error) data.error = quick.error;
+        notify();
+      }
     } catch (error) {
       data.quick = { error: safeError(error) };
       data.quickAt = Date.now();
@@ -691,8 +709,9 @@ async function loadRepoStatus(path, force) {
   const invalidate = Boolean(data.statusInvalidate);
   data.statusInvalidate = false;
   data.loading.status = true;
+  // 已有快照的后台轮询不闪加载态；首次加载与错误恢复仍需立即通知。
+  if (!data.statusAt || data.error) notify();
   data.error = null;
-  notify();
   const task = (async () => {
     try {
       const res = await runGit(
@@ -734,23 +753,26 @@ async function loadRepoStatus(path, force) {
         // 内容未变：沿用旧对象，避免轮询导致选中文件的差异重载与界面闪烁。
         parsed = data.status;
       }
+      const wasLoaded = Boolean(data.statusAt && !data.error);
       data.statusAt = Date.now();
-      // 完整 status 已包含分支与文件清单，同步一份轻量快照给仓库侧栏，避免两边计数不一致。
-      data.quick = {
-        branch: parsed.branch,
-        changed: uniquePaths(
-          parsed.staged.concat(parsed.unstaged, parsed.untracked, parsed.conflicted),
-        ).length,
-        staged: parsed.staged.length,
-        unstaged: parsed.unstaged.length,
-        untracked: parsed.untracked.length,
-        conflicted: parsed.conflicted.length,
-        truncated: parsed.truncated,
-        files: parsed.staged
-          .concat(parsed.unstaged, parsed.untracked, parsed.conflicted)
-          .map((entry) => (entry.staged ? "S:" : "W:") + entry.path)
-          .sort(),
-      };
+      // 完整 status 已包含分支与文件清单；无变化时保留 quick 的引用与数组。
+      if (changed || !wasLoaded) {
+        data.quick = {
+          branch: parsed.branch,
+          changed: uniquePaths(
+            parsed.staged.concat(parsed.unstaged, parsed.untracked, parsed.conflicted),
+          ).length,
+          staged: parsed.staged.length,
+          unstaged: parsed.unstaged.length,
+          untracked: parsed.untracked.length,
+          conflicted: parsed.conflicted.length,
+          truncated: parsed.truncated,
+          files: parsed.staged
+            .concat(parsed.unstaged, parsed.untracked, parsed.conflicted)
+            .map((entry) => (entry.staged ? "S:" : "W:") + entry.path)
+            .sort(),
+        };
+      }
       data.quickAt = Date.now();
       data.loading.status = false;
       data.error = null;
@@ -763,6 +785,7 @@ async function loadRepoStatus(path, force) {
         if (hasPreviousHead && nextHead !== previousHead) refreshLogAfterHeadChange(key);
       }
       const selection = state.selectedFile;
+      let selectionChanged = false;
       if (selection && pathKey(selection.repo) === pathKey(key)) {
         const match = parsed.entries.find(
           (entry) => entry.path === selection.path && Boolean(entry.staged) === Boolean(selection.staged),
@@ -775,9 +798,10 @@ async function loadRepoStatus(path, force) {
             state.selectedFile = Object.assign({}, selection, { staged: Boolean(moved.staged) });
             state.diffMode = moved.staged ? "staged" : "worktree";
           }
+          selectionChanged = true;
         }
       }
-      notify();
+      if (changed || !wasLoaded || selectionChanged) notify();
       // 内容未变时无需每轮轮询都启动一次 shell 检查操作状态。
       if (changed || invalidate || Date.now() - (data.operationsAt || 0) >= 15000) {
         data.operationsAt = Date.now();

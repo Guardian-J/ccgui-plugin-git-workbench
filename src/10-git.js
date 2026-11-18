@@ -63,7 +63,8 @@ function pushConsole(entry) {
   item.stderr = maskSecrets(truncate(String(item.stderr || "").replace(/\0/g, "\n"), 20000));
   consoleEntries = consoleEntries.concat([item]);
   if (consoleEntries.length > 300) consoleEntries = consoleEntries.slice(-300);
-  notifyDeferred();
+  // 日志仍完整保留；仅在控制台可见时重渲染，避免后台 Git 轮询牵动整个工作台。
+  if (state.workbenchOpen && state.activeTab === "console") notifyDeferred();
   return item;
 }
 

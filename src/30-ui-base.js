@@ -254,25 +254,27 @@ const PLUGIN_CSS = `
 .cg-split-row:hover .cg-split-cell:not(.cg-add):not(.cg-del):not(.cg-split-empty){background:var(--cg-hover)}
 
 /* ---------- 提交图 ---------- */
-.cg-log{flex:1;min-height:0;display:flex;background:var(--cg-surface)}
-.cg-log-list{flex:0 1 56%;width:auto;min-width:min(18.75rem,45%);max-width:70%;border-right:1px solid var(--cg-border);display:flex;flex-direction:column;min-height:0;container-type:inline-size}
-.cg-log-scroll{flex:1;overflow:auto;min-height:0;padding:0 0 2px}
-.cg-commit-head{display:flex;align-items:center;gap:0.625rem;height:1.625rem;padding:0 0.75rem 0 0.5rem;font-size:0.6563rem;font-weight:650;letter-spacing:.04em;color:var(--color-text-tertiary);background:var(--cg-surface);border-bottom:1px solid var(--cg-border);position:sticky;top:0;z-index:1;flex:none}
-.cg-commit-head-label{flex:1;min-width:0}
-.cg-commit-row{display:flex;align-items:center;gap:0.625rem;height:1.875rem;padding:0 0.75rem 0 0.5rem;cursor:pointer;min-width:0;transition:background 100ms ease}
+.cg-log{flex:1;min-width:0;min-height:0;display:flex;background:var(--cg-surface)}
+.cg-log-list{flex:0 1 56%;width:auto;min-width:0;max-width:70%;border-right:1px solid var(--cg-border);display:flex;flex-direction:column;min-height:0;container:cg-log-list/inline-size}
+.cg-log-scroll{flex:1;overflow:auto;min-height:0;padding:0 0 2px;scrollbar-gutter:stable}
+.cg-commit-head{display:flex;align-items:center;gap:0.625rem;min-width:100%;height:1.625rem;padding:0 0.75rem 0 calc(0.5rem + var(--cg-graph-width));font-size:0.6563rem;font-weight:650;letter-spacing:.04em;color:var(--color-text-tertiary);background:var(--cg-surface);border-bottom:1px solid var(--cg-border);position:sticky;top:0;z-index:1;flex:none}
+.cg-commit-head-label{flex:1 0 6rem;min-width:6rem}
+.cg-commit-row{display:flex;align-items:center;gap:0.625rem;min-width:100%;height:1.875rem;padding:0 0.75rem 0 0.5rem;cursor:pointer;transition:background 100ms ease}
 .cg-commit-row:hover{background:var(--cg-hover)}
 .cg-commit-row.cg-selected{background:var(--cg-accent-soft);box-shadow:inset 2px 0 0 var(--cg-accent)}
 .cg-commit-row.cg-is-head .cg-commit-subject{font-weight:600}
 .cg-graph{flex:none;align-self:center}
-.cg-commit-text{flex:1;min-width:0;display:flex;align-items:center;gap:0.4375rem}
-.cg-commit-subject{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.7813rem}
+.cg-commit-text{flex:1 1 12rem;min-width:12rem;display:flex;align-items:center;gap:0.4375rem;overflow:hidden}
+.cg-commit-subject{flex:1 0 3rem;min-width:3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.7813rem}
 .cg-commit-meta{flex:none;color:var(--color-text-tertiary);font-size:0.6875rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cg-commit-author{width:6rem}
 .cg-commit-date{width:4.5rem;text-align:right;font-variant-numeric:tabular-nums}
 .cg-commit-time{width:4.5rem;text-align:right}
 .cg-commit-hash{width:3.875rem;text-align:right}
-@container (max-width:35rem){.cg-commit-author{display:none}}
-.cg-ref{display:inline-flex;align-items:center;gap:2px;height:1.125rem;padding:0 0.375rem;border-radius:0.375rem;font-size:0.625rem;font-weight:650;letter-spacing:.02em;max-width:min(10.625rem,45%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@container cg-log-list (max-width:35rem){.cg-commit-author{display:none}}
+@container cg-log-list (max-width:28rem){.cg-commit-time{display:none}}
+@container cg-log-list (max-width:22rem){.cg-commit-date,.cg-commit-hash{display:none}}
+.cg-ref{display:inline-flex;align-items:center;gap:2px;flex:0 1 10.625rem;min-width:0;height:1.125rem;padding:0 0.375rem;border-radius:0.375rem;font-size:0.625rem;font-weight:650;letter-spacing:.02em;max-width:10.625rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cg-ref.cg-head{background:var(--color-accent-500);color:var(--color-text-white)}
 .cg-ref.cg-branch{background:var(--color-status-cyan-background);color:var(--color-status-cyan-text)}
 .cg-ref.cg-tag{background:var(--color-status-yellow-background);color:var(--color-status-yellow-text)}

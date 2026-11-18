@@ -53,6 +53,29 @@ async function toggleDir(repo, path) {
 
 /* ---------- 本地更改 ---------- */
 
+// status 不变时复用其数组；WeakMap 随状态对象淘汰，不额外保留历史快照。
+const compactTreeCache = new WeakMap();
+const sortedEntriesCache = new WeakMap();
+
+function cachedCompactFileTree(entries) {
+  if (!Array.isArray(entries)) return [];
+  let tree = compactTreeCache.get(entries);
+  if (!tree) {
+    tree = buildCompactFileTree(entries);
+    compactTreeCache.set(entries, tree);
+  }
+  return tree;
+}
+
+function sortedFileEntries(entries) {
+  let sorted = sortedEntriesCache.get(entries);
+  if (!sorted) {
+    sorted = entries.slice().sort((a, b) => String(a.path).localeCompare(String(b.path), "zh-Hans-CN"));
+    sortedEntriesCache.set(entries, sorted);
+  }
+  return sorted;
+}
+
 function ChangesPanel(props) {
   const h = appCtx.react.createElement;
   const s = useStoreSnapshot();
@@ -126,9 +149,9 @@ function visibleFileOrder(data, groups, flat) {
   for (const group of groups) {
     if (data.expandedGroups && data.expandedGroups[group.key] === false) continue;
     if (flat) {
-      for (const entry of group.entries.slice().sort((a, b) => String(a.path).localeCompare(String(b.path), "zh-Hans-CN"))) out.push(entry);
+      for (const entry of sortedFileEntries(group.entries)) out.push(entry);
     } else {
-      walk(buildCompactFileTree(group.entries));
+      walk(cachedCompactFileTree(group.entries));
     }
   }
   return out;
@@ -294,7 +317,7 @@ function ChangeGroup(props) {
     data.expandedGroups = Object.assign({}, data.expandedGroups || {}, { [group.key]: !expanded });
     notify();
   };
-  const tree = buildCompactFileTree(group.entries);
+  const tree = cachedCompactFileTree(group.entries);
   return h(
     "div",
     { className: "cg-group" },
@@ -335,7 +358,7 @@ function ChangeGroup(props) {
         ? h(
             appCtx.react.Fragment,
             null,
-            group.entries.slice().sort((a, b) => String(a.path).localeCompare(String(b.path), "zh-Hans-CN")).map((entry) =>
+            sortedFileEntries(group.entries).map((entry) =>
               h(FileRow, { key: "f:" + group.key + ":" + entry.path, repo, data, groupKey: group.key, entry, selection, depth: -1 }),
             ),
           )

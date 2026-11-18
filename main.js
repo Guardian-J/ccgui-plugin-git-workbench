@@ -10,7 +10,7 @@
  * ------------------------------------------------------------------------- */
 
 const PLUGIN_ID = "git-workbench";
-const PLUGIN_VERSION = "0.2.27";
+const PLUGIN_VERSION = "0.2.28";
 const GIT_MAX_OUTPUT = 64 * 1024; // 宿主 plugin_exec_run 单流上限
 const NETWORK_TIMEOUT_MS = 300 * 1000; // 宿主上限
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -527,7 +527,8 @@ function pushConsole(entry) {
   item.stderr = maskSecrets(truncate(String(item.stderr || "").replace(/\0/g, "\n"), 20000));
   consoleEntries = consoleEntries.concat([item]);
   if (consoleEntries.length > 300) consoleEntries = consoleEntries.slice(-300);
-  notifyDeferred();
+  // 日志仍完整保留；仅在控制台可见时重渲染，避免后台 Git 轮询牵动整个工作台。
+  if (state.workbenchOpen && state.activeTab === "console") notifyDeferred();
   return item;
 }
 
@@ -2777,6 +2778,20 @@ async function loadQuickStatuses(repos) {
   await Promise.all(workers);
 }
 
+function quickStatusChanged(previous, next) {
+  if (!previous || previous.error !== next.error) return true;
+  if (next.error) return false;
+  const a = previous.branch || {};
+  const b = next.branch || {};
+  if (["head", "oid", "upstream", "ahead", "behind", "detached", "unborn", "upstreamGone"]
+    .some((key) => a[key] !== b[key])) return true;
+  if (["changed", "staged", "unstaged", "untracked", "conflicted", "truncated"]
+    .some((key) => previous[key] !== next[key])) return true;
+  const before = previous.files || [];
+  const after = next.files || [];
+  return before.length !== after.length || before.some((path, index) => path !== after[index]);
+}
+
 function loadQuickStatusFor(path, options) {
   const key = normalizePath(path);
   const force = Boolean(options && options.force);
@@ -2789,10 +2804,14 @@ function loadQuickStatusFor(path, options) {
     try {
       const quick = await loadQuickStatus(key);
       if (!state.repoData[key]) return;
-      data.quick = quick;
+      const previous = data.quick;
+      const changed = quickStatusChanged(previous, quick);
+      if (changed) data.quick = quick;
       data.quickAt = Date.now();
-      if (quick.error) data.error = quick.error;
-      notify();
+      if (changed) {
+        if (quick.error) data.error = quick.error;
+        notify();
+      }
     } catch (error) {
       data.quick = { error: safeError(error) };
       data.quickAt = Date.now();
@@ -2831,8 +2850,9 @@ async function loadRepoStatus(path, force) {
   const invalidate = Boolean(data.statusInvalidate);
   data.statusInvalidate = false;
   data.loading.status = true;
+  // 已有快照的后台轮询不闪加载态；首次加载与错误恢复仍需立即通知。
+  if (!data.statusAt || data.error) notify();
   data.error = null;
-  notify();
   const task = (async () => {
     try {
       const res = await runGit(
@@ -2874,23 +2894,26 @@ async function loadRepoStatus(path, force) {
         // 内容未变：沿用旧对象，避免轮询导致选中文件的差异重载与界面闪烁。
         parsed = data.status;
       }
+      const wasLoaded = Boolean(data.statusAt && !data.error);
       data.statusAt = Date.now();
-      // 完整 status 已包含分支与文件清单，同步一份轻量快照给仓库侧栏，避免两边计数不一致。
-      data.quick = {
-        branch: parsed.branch,
-        changed: uniquePaths(
-          parsed.staged.concat(parsed.unstaged, parsed.untracked, parsed.conflicted),
-        ).length,
-        staged: parsed.staged.length,
-        unstaged: parsed.unstaged.length,
-        untracked: parsed.untracked.length,
-        conflicted: parsed.conflicted.length,
-        truncated: parsed.truncated,
-        files: parsed.staged
-          .concat(parsed.unstaged, parsed.untracked, parsed.conflicted)
-          .map((entry) => (entry.staged ? "S:" : "W:") + entry.path)
-          .sort(),
-      };
+      // 完整 status 已包含分支与文件清单；无变化时保留 quick 的引用与数组。
+      if (changed || !wasLoaded) {
+        data.quick = {
+          branch: parsed.branch,
+          changed: uniquePaths(
+            parsed.staged.concat(parsed.unstaged, parsed.untracked, parsed.conflicted),
+          ).length,
+          staged: parsed.staged.length,
+          unstaged: parsed.unstaged.length,
+          untracked: parsed.untracked.length,
+          conflicted: parsed.conflicted.length,
+          truncated: parsed.truncated,
+          files: parsed.staged
+            .concat(parsed.unstaged, parsed.untracked, parsed.conflicted)
+            .map((entry) => (entry.staged ? "S:" : "W:") + entry.path)
+            .sort(),
+        };
+      }
       data.quickAt = Date.now();
       data.loading.status = false;
       data.error = null;
@@ -2903,6 +2926,7 @@ async function loadRepoStatus(path, force) {
         if (hasPreviousHead && nextHead !== previousHead) refreshLogAfterHeadChange(key);
       }
       const selection = state.selectedFile;
+      let selectionChanged = false;
       if (selection && pathKey(selection.repo) === pathKey(key)) {
         const match = parsed.entries.find(
           (entry) => entry.path === selection.path && Boolean(entry.staged) === Boolean(selection.staged),
@@ -2915,9 +2939,10 @@ async function loadRepoStatus(path, force) {
             state.selectedFile = Object.assign({}, selection, { staged: Boolean(moved.staged) });
             state.diffMode = moved.staged ? "staged" : "worktree";
           }
+          selectionChanged = true;
         }
       }
-      notify();
+      if (changed || !wasLoaded || selectionChanged) notify();
       // 内容未变时无需每轮轮询都启动一次 shell 检查操作状态。
       if (changed || invalidate || Date.now() - (data.operationsAt || 0) >= 15000) {
         data.operationsAt = Date.now();
@@ -6166,25 +6191,27 @@ const PLUGIN_CSS = `
 .cg-split-row:hover .cg-split-cell:not(.cg-add):not(.cg-del):not(.cg-split-empty){background:var(--cg-hover)}
 
 /* ---------- 提交图 ---------- */
-.cg-log{flex:1;min-height:0;display:flex;background:var(--cg-surface)}
-.cg-log-list{flex:0 1 56%;width:auto;min-width:min(18.75rem,45%);max-width:70%;border-right:1px solid var(--cg-border);display:flex;flex-direction:column;min-height:0;container-type:inline-size}
-.cg-log-scroll{flex:1;overflow:auto;min-height:0;padding:0 0 2px}
-.cg-commit-head{display:flex;align-items:center;gap:0.625rem;height:1.625rem;padding:0 0.75rem 0 0.5rem;font-size:0.6563rem;font-weight:650;letter-spacing:.04em;color:var(--color-text-tertiary);background:var(--cg-surface);border-bottom:1px solid var(--cg-border);position:sticky;top:0;z-index:1;flex:none}
-.cg-commit-head-label{flex:1;min-width:0}
-.cg-commit-row{display:flex;align-items:center;gap:0.625rem;height:1.875rem;padding:0 0.75rem 0 0.5rem;cursor:pointer;min-width:0;transition:background 100ms ease}
+.cg-log{flex:1;min-width:0;min-height:0;display:flex;background:var(--cg-surface)}
+.cg-log-list{flex:0 1 56%;width:auto;min-width:0;max-width:70%;border-right:1px solid var(--cg-border);display:flex;flex-direction:column;min-height:0;container:cg-log-list/inline-size}
+.cg-log-scroll{flex:1;overflow:auto;min-height:0;padding:0 0 2px;scrollbar-gutter:stable}
+.cg-commit-head{display:flex;align-items:center;gap:0.625rem;min-width:100%;height:1.625rem;padding:0 0.75rem 0 calc(0.5rem + var(--cg-graph-width));font-size:0.6563rem;font-weight:650;letter-spacing:.04em;color:var(--color-text-tertiary);background:var(--cg-surface);border-bottom:1px solid var(--cg-border);position:sticky;top:0;z-index:1;flex:none}
+.cg-commit-head-label{flex:1 0 6rem;min-width:6rem}
+.cg-commit-row{display:flex;align-items:center;gap:0.625rem;min-width:100%;height:1.875rem;padding:0 0.75rem 0 0.5rem;cursor:pointer;transition:background 100ms ease}
 .cg-commit-row:hover{background:var(--cg-hover)}
 .cg-commit-row.cg-selected{background:var(--cg-accent-soft);box-shadow:inset 2px 0 0 var(--cg-accent)}
 .cg-commit-row.cg-is-head .cg-commit-subject{font-weight:600}
 .cg-graph{flex:none;align-self:center}
-.cg-commit-text{flex:1;min-width:0;display:flex;align-items:center;gap:0.4375rem}
-.cg-commit-subject{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.7813rem}
+.cg-commit-text{flex:1 1 12rem;min-width:12rem;display:flex;align-items:center;gap:0.4375rem;overflow:hidden}
+.cg-commit-subject{flex:1 0 3rem;min-width:3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.7813rem}
 .cg-commit-meta{flex:none;color:var(--color-text-tertiary);font-size:0.6875rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cg-commit-author{width:6rem}
 .cg-commit-date{width:4.5rem;text-align:right;font-variant-numeric:tabular-nums}
 .cg-commit-time{width:4.5rem;text-align:right}
 .cg-commit-hash{width:3.875rem;text-align:right}
-@container (max-width:35rem){.cg-commit-author{display:none}}
-.cg-ref{display:inline-flex;align-items:center;gap:2px;height:1.125rem;padding:0 0.375rem;border-radius:0.375rem;font-size:0.625rem;font-weight:650;letter-spacing:.02em;max-width:min(10.625rem,45%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@container cg-log-list (max-width:35rem){.cg-commit-author{display:none}}
+@container cg-log-list (max-width:28rem){.cg-commit-time{display:none}}
+@container cg-log-list (max-width:22rem){.cg-commit-date,.cg-commit-hash{display:none}}
+.cg-ref{display:inline-flex;align-items:center;gap:2px;flex:0 1 10.625rem;min-width:0;height:1.125rem;padding:0 0.375rem;border-radius:0.375rem;font-size:0.625rem;font-weight:650;letter-spacing:.02em;max-width:10.625rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cg-ref.cg-head{background:var(--color-accent-500);color:var(--color-text-white)}
 .cg-ref.cg-branch{background:var(--color-status-cyan-background);color:var(--color-status-cyan-text)}
 .cg-ref.cg-tag{background:var(--color-status-yellow-background);color:var(--color-status-yellow-text)}
@@ -7384,6 +7411,29 @@ async function toggleDir(repo, path) {
 
 /* ---------- 本地更改 ---------- */
 
+// status 不变时复用其数组；WeakMap 随状态对象淘汰，不额外保留历史快照。
+const compactTreeCache = new WeakMap();
+const sortedEntriesCache = new WeakMap();
+
+function cachedCompactFileTree(entries) {
+  if (!Array.isArray(entries)) return [];
+  let tree = compactTreeCache.get(entries);
+  if (!tree) {
+    tree = buildCompactFileTree(entries);
+    compactTreeCache.set(entries, tree);
+  }
+  return tree;
+}
+
+function sortedFileEntries(entries) {
+  let sorted = sortedEntriesCache.get(entries);
+  if (!sorted) {
+    sorted = entries.slice().sort((a, b) => String(a.path).localeCompare(String(b.path), "zh-Hans-CN"));
+    sortedEntriesCache.set(entries, sorted);
+  }
+  return sorted;
+}
+
 function ChangesPanel(props) {
   const h = appCtx.react.createElement;
   const s = useStoreSnapshot();
@@ -7457,9 +7507,9 @@ function visibleFileOrder(data, groups, flat) {
   for (const group of groups) {
     if (data.expandedGroups && data.expandedGroups[group.key] === false) continue;
     if (flat) {
-      for (const entry of group.entries.slice().sort((a, b) => String(a.path).localeCompare(String(b.path), "zh-Hans-CN"))) out.push(entry);
+      for (const entry of sortedFileEntries(group.entries)) out.push(entry);
     } else {
-      walk(buildCompactFileTree(group.entries));
+      walk(cachedCompactFileTree(group.entries));
     }
   }
   return out;
@@ -7625,7 +7675,7 @@ function ChangeGroup(props) {
     data.expandedGroups = Object.assign({}, data.expandedGroups || {}, { [group.key]: !expanded });
     notify();
   };
-  const tree = buildCompactFileTree(group.entries);
+  const tree = cachedCompactFileTree(group.entries);
   return h(
     "div",
     { className: "cg-group" },
@@ -7666,7 +7716,7 @@ function ChangeGroup(props) {
         ? h(
             appCtx.react.Fragment,
             null,
-            group.entries.slice().sort((a, b) => String(a.path).localeCompare(String(b.path), "zh-Hans-CN")).map((entry) =>
+            sortedFileEntries(group.entries).map((entry) =>
               h(FileRow, { key: "f:" + group.key + ":" + entry.path, repo, data, groupKey: group.key, entry, selection, depth: -1 }),
             ),
           )
@@ -8719,10 +8769,14 @@ function laneColor(index) {
   return LANE_COLORS[Math.abs(index) % LANE_COLORS.length];
 }
 
+function graphWidth(maxLanes) {
+  return Math.max(16, Math.min(12, maxLanes) * 14 + 8);
+}
+
 function GraphCell(props) {
   const h = appCtx.react.createElement;
   const { row, maxLanes } = props;
-  const width = Math.max(16, Math.min(12, maxLanes) * 14 + 8);
+  const width = graphWidth(maxLanes);
   const mid = 14;
   const limit = Math.min(12, maxLanes);
   // lane 数超过 12 时，后续列折到最后一列，避免节点画出 viewBox。
@@ -8942,7 +8996,7 @@ function LogTab(props) {
       { className: "cg-log" },
       h(
         "div",
-        { className: "cg-log-list" },
+        { className: "cg-log-list", style: { "--cg-graph-width": graphWidth(graph.maxLanes) + "px" } },
         h(
           "div",
           { className: "cg-log-scroll" },
@@ -9068,7 +9122,7 @@ function treeEntries(node, out) {
 
 function FileTreeList(props) {
   const h = appCtx.react.createElement;
-  const { useState } = appCtx.react;
+  const { useState, useMemo } = appCtx.react;
   const { files, activePath, onSelect, codeOf, toneOf, checkedOf, onToggleCheck, onCheckMany, onActivate } = props;
   const readCode = codeOf || ((entry) => entry.code);
   const readTone = toneOf || ((entry) => statusTone(entry.code));
@@ -9081,7 +9135,7 @@ function FileTreeList(props) {
       return next;
     });
   };
-  const nodes = buildCompactFileTree(files || []);
+  const nodes = useMemo(() => cachedCompactFileTree(files || []), [files]);
   const rows = [];
   const walk = (list, depth) => {
     for (const node of list) {

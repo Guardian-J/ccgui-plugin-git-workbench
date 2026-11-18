@@ -192,10 +192,14 @@ function laneColor(index) {
   return LANE_COLORS[Math.abs(index) % LANE_COLORS.length];
 }
 
+function graphWidth(maxLanes) {
+  return Math.max(16, Math.min(12, maxLanes) * 14 + 8);
+}
+
 function GraphCell(props) {
   const h = appCtx.react.createElement;
   const { row, maxLanes } = props;
-  const width = Math.max(16, Math.min(12, maxLanes) * 14 + 8);
+  const width = graphWidth(maxLanes);
   const mid = 14;
   const limit = Math.min(12, maxLanes);
   // lane 数超过 12 时，后续列折到最后一列，避免节点画出 viewBox。
@@ -415,7 +419,7 @@ function LogTab(props) {
       { className: "cg-log" },
       h(
         "div",
-        { className: "cg-log-list" },
+        { className: "cg-log-list", style: { "--cg-graph-width": graphWidth(graph.maxLanes) + "px" } },
         h(
           "div",
           { className: "cg-log-scroll" },
@@ -541,7 +545,7 @@ function treeEntries(node, out) {
 
 function FileTreeList(props) {
   const h = appCtx.react.createElement;
-  const { useState } = appCtx.react;
+  const { useState, useMemo } = appCtx.react;
   const { files, activePath, onSelect, codeOf, toneOf, checkedOf, onToggleCheck, onCheckMany, onActivate } = props;
   const readCode = codeOf || ((entry) => entry.code);
   const readTone = toneOf || ((entry) => statusTone(entry.code));
@@ -554,7 +558,7 @@ function FileTreeList(props) {
       return next;
     });
   };
-  const nodes = buildCompactFileTree(files || []);
+  const nodes = useMemo(() => cachedCompactFileTree(files || []), [files]);
   const rows = [];
   const walk = (list, depth) => {
     for (const node of list) {
